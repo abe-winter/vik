@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "vik",
+  "project_id": "c18947f0-2fdd-4ccd-9da5-99dd4dc80dd7"
+}

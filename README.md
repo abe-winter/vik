@@ -38,6 +38,7 @@ vik list --done false --sort-by priority --order-by desc
 vik list -s "search text" --filter "priority >= 4"
 vik list --mine                                # tasks assigned to me (config username)
 vik list --topo-sort                           # blocker order: tasks that block others first (id tie-break)
+vik list --compact                             # trim each task to high-signal fields (saves agent context)
 
 vik create "write the docs" --priority 3 --due-date 2026-07-01T17:00:00Z
 echo "long body" | vik create "task" --description -
@@ -46,6 +47,7 @@ vik modify 25 --done true --priority 5         # safe partial update (read-merge
 vik modify 25 --assignee 2                      # assignee by id (username needs /users token scope)
 vik modify 25 --mine                            # assign to me (config username)
 
+vik comments 25                                 # read a task's comment thread
 vik comment 25 "looks good"
 git log -1 --format=%B | vik comment 25 -       # comment body from stdin
 

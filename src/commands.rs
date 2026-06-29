@@ -148,6 +148,81 @@ pub fn topo_sort_blockers(tasks: &Value) -> Result<Value> {
     Ok(Value::Array(sorted))
 }
 
+/// Project a task list down to a few high-signal fields to save agent context.
+/// Keeps id, title, done, priority, description, assignee usernames, attachment
+/// {id,name}, and related-task {id,title} per relation kind. Empty/zero/null
+/// fields are dropped entirely (the raw response is mostly unset date columns).
+pub fn compact_tasks(tasks: &Value) -> Value {
+    match tasks.as_array() {
+        Some(arr) => Value::Array(arr.iter().map(compact_task).collect()),
+        None => tasks.clone(),
+    }
+}
+
+fn compact_task(t: &Value) -> Value {
+    let mut o = serde_json::Map::new();
+    let mut put = |k: &str, v: Value| {
+        o.insert(k.to_string(), v);
+    };
+
+    if let Some(v) = t.get("id") {
+        put("id", v.clone());
+    }
+    if let Some(v) = t.get("title") {
+        put("title", v.clone());
+    }
+    // done is central to task state, so always include it.
+    if let Some(v) = t.get("done") {
+        put("done", v.clone());
+    }
+    if let Some(p) = t.get("priority").and_then(Value::as_i64) {
+        if p != 0 {
+            put("priority", json!(p));
+        }
+    }
+    if let Some(d) = t.get("description").and_then(Value::as_str) {
+        if !d.is_empty() {
+            put("description", json!(d));
+        }
+    }
+    if let Some(arr) = t.get("assignees").and_then(Value::as_array) {
+        let names: Vec<Value> = arr
+            .iter()
+            .filter_map(|a| a.get("username").cloned())
+            .collect();
+        if !names.is_empty() {
+            put("assignees", Value::Array(names));
+        }
+    }
+    if let Some(arr) = t.get("attachments").and_then(Value::as_array) {
+        let items: Vec<Value> = arr
+            .iter()
+            .map(|a| json!({ "id": a.get("id"), "name": a.get("file").and_then(|f| f.get("name")) }))
+            .collect();
+        if !items.is_empty() {
+            put("attachments", Value::Array(items));
+        }
+    }
+    if let Some(map) = t.get("related_tasks").and_then(Value::as_object) {
+        let mut rel = serde_json::Map::new();
+        for (kind, related) in map {
+            if let Some(arr) = related.as_array() {
+                let items: Vec<Value> = arr
+                    .iter()
+                    .map(|rt| json!({ "id": rt.get("id"), "title": rt.get("title") }))
+                    .collect();
+                if !items.is_empty() {
+                    rel.insert(kind.clone(), Value::Array(items));
+                }
+            }
+        }
+        if !rel.is_empty() {
+            put("related_tasks", Value::Object(rel));
+        }
+    }
+    Value::Object(o)
+}
+
 /// Create a task in a project via `PUT /projects/{id}/tasks`.
 pub fn create(c: &VikunjaClient, project_id: i64, task: &TaskWrite) -> Result<Value> {
     c.put_json(&format!("/projects/{project_id}/tasks"), task)
@@ -187,6 +262,12 @@ pub fn comment(c: &VikunjaClient, id: i64, text: &str) -> Result<Value> {
             comment: text.to_string(),
         },
     )
+}
+
+/// List a task's comments via `GET /tasks/{id}/comments` (for reading a task's
+/// pseudo-chat thread).
+pub fn comments(c: &VikunjaClient, task_id: i64) -> Result<Value> {
+    c.get(&format!("/tasks/{task_id}/comments"), &[])
 }
 
 /// List a task's attachments via `GET /tasks/{id}/attachments`.
@@ -245,8 +326,67 @@ pub fn embed_attachments(c: &VikunjaClient, task_id: i64, uploaded: &Value) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::topo_sort_blockers;
+    use super::{compact_task, topo_sort_blockers};
     use serde_json::{json, Value};
+
+    #[test]
+    fn compact_drops_empty_and_keeps_signal() {
+        // The sample task from the feature request: only set fields survive.
+        let task = json!({
+            "assignees": [{"id": 1, "name": "", "username": "awinter"}],
+            "attachments": null,
+            "bucket_id": 0,
+            "created_by": {"id": 1, "username": "awinter"},
+            "description": "<p>(user does this manually)</p>",
+            "done": false,
+            "done_at": "0001-01-01T00:00:00Z",
+            "due_date": "0001-01-01T00:00:00Z",
+            "id": 4,
+            "identifier": "#4",
+            "labels": null,
+            "priority": 0,
+            "project_id": 4,
+            "related_tasks": {},
+            "title": "decide on sim approach and describe initial test layout",
+        });
+        let got = compact_task(&task);
+        assert_eq!(
+            got,
+            json!({
+                "id": 4,
+                "title": "decide on sim approach and describe initial test layout",
+                "done": false,
+                "description": "<p>(user does this manually)</p>",
+                "assignees": ["awinter"],
+            })
+        );
+    }
+
+    #[test]
+    fn compact_keeps_priority_attachments_and_relations() {
+        let task = json!({
+            "id": 7,
+            "title": "build",
+            "done": true,
+            "priority": 4,
+            "attachments": [{"id": 9, "file": {"name": "diagram.png", "size": 70}}],
+            "related_tasks": {
+                "blocking": [{"id": 8, "title": "ship", "description": "ignored"}],
+            },
+        });
+        let got = compact_task(&task);
+        assert_eq!(
+            got,
+            json!({
+                "id": 7,
+                "title": "build",
+                "done": true,
+                "priority": 4,
+                "attachments": [{"id": 9, "name": "diagram.png"}],
+                "related_tasks": {"blocking": [{"id": 8, "title": "ship"}]},
+            })
+        );
+    }
 
     fn ids(v: &Value) -> Vec<i64> {
         v.as_array()

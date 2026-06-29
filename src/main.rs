@@ -56,6 +56,8 @@ enum Command {
     Modify(ModifyArgs),
     /// Add a comment to a task
     Comment(CommentArgs),
+    /// List a task's comments
+    Comments(CommentsArgs),
     /// List a task's attachments
     Attachments(AttachmentsArgs),
     /// Upload file attachment(s) to a task
@@ -85,6 +87,9 @@ struct ListArgs {
     /// Reorder results in blocker order (client-side topological sort, id tie-break)
     #[arg(long)]
     topo_sort: bool,
+    /// Trim each task to a few high-signal fields to save context
+    #[arg(long)]
+    compact: bool,
     /// Maximum number of tasks to return
     #[arg(long, default_value_t = 50)]
     per_page: u32,
@@ -144,6 +149,12 @@ struct CommentArgs {
     id: i64,
     /// Comment text (use - to read from stdin)
     comment: String,
+}
+
+#[derive(Args)]
+struct CommentsArgs {
+    /// Task id
+    id: i64,
 }
 
 #[derive(Args)]
@@ -260,8 +271,13 @@ fn main() -> Result<()> {
                 a.search.as_deref(),
                 a.per_page,
             )?;
-            if a.topo_sort {
+            let tasks = if a.topo_sort {
                 commands::topo_sort_blockers(&tasks)?
+            } else {
+                tasks
+            };
+            if a.compact {
+                commands::compact_tasks(&tasks)
             } else {
                 tasks
             }
@@ -308,6 +324,8 @@ fn main() -> Result<()> {
             let text = read_dash(Some(a.comment.clone()))?.unwrap_or_default();
             commands::comment(&ctx.client, a.id, &text)?
         }
+
+        Command::Comments(a) => commands::comments(&cli.ctx()?.client, a.id)?,
 
         Command::Attachments(a) => commands::attachments(&cli.ctx()?.client, a.id)?,
 

@@ -32,6 +32,10 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<std::path::PathBuf>,
 
+    /// Log each API request (method, URL, body) and response status to stderr
+    #[arg(long, global = true)]
+    debug: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -179,7 +183,7 @@ impl Cli {
             .context("no token: pass --token or set VIKUNJA_TOKEN")?;
         let project = self.project.clone().or(cfg.project);
         Ok(Ctx {
-            client: VikunjaClient::new(&server, &token)?,
+            client: VikunjaClient::new(&server, &token, self.debug)?,
             project,
         })
     }

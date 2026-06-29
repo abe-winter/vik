@@ -17,10 +17,11 @@ pub struct VikunjaClient {
     base: String, // {server}/api/v1
     token: String,
     http: Client,
+    debug: bool,
 }
 
 impl VikunjaClient {
-    pub fn new(server: &str, token: &str) -> Result<Self> {
+    pub fn new(server: &str, token: &str, debug: bool) -> Result<Self> {
         // Default to https when the configured server omits a scheme, otherwise
         // reqwest rejects the relative URL.
         let server = if server.contains("://") {
@@ -34,6 +35,7 @@ impl VikunjaClient {
             base,
             token: token.to_string(),
             http,
+            debug,
         })
     }
 
@@ -42,10 +44,25 @@ impl VikunjaClient {
     }
 
     fn send(&self, rb: RequestBuilder) -> Result<Value> {
-        let resp = rb
+        let req = rb
             .bearer_auth(&self.token)
-            .send()
+            .build()
+            .context("building request")?;
+        if self.debug {
+            // Token is sent in the Authorization header, which we deliberately
+            // do not log.
+            eprintln!("[vik] {} {}", req.method(), req.url());
+            if let Some(body) = req.body().and_then(|b| b.as_bytes()) {
+                eprintln!("[vik] body: {}", String::from_utf8_lossy(body));
+            }
+        }
+        let resp = self
+            .http
+            .execute(req)
             .context("sending request to vikunja")?;
+        if self.debug {
+            eprintln!("[vik] -> {}", resp.status());
+        }
         Self::handle(resp)
     }
 

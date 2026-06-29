@@ -37,6 +37,7 @@ vik list                                       # tasks in the configured project
 vik list --done false --sort-by priority --order-by desc
 vik list -s "search text" --filter "priority >= 4"
 vik list --mine                                # tasks assigned to me (config username)
+vik list --topo-sort                           # blocker order: tasks that block others first (id tie-break)
 
 vik create "write the docs" --priority 3 --due-date 2026-07-01T17:00:00Z
 echo "long body" | vik create "task" --description -

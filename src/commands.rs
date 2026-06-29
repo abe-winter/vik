@@ -1,5 +1,6 @@
 //! Command implementations. Each returns the raw API JSON for `main` to print.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -66,6 +67,83 @@ pub fn list(
         query.push(("order_by", o.to_string()));
     }
     c.get("/tasks", &query)
+}
+
+/// Reorder a task array (the `list` response) into blocker order via a
+/// client-side topological sort: a task that blocks another comes first, with
+/// task id as the tie-breaker. Edges come from each task's `related_tasks`
+/// (`blocking` → this-before-that, `blocked` → that-before-this); relations to
+/// tasks outside the result set are ignored. Any blocking cycle is broken by
+/// appending the remaining tasks in id order so nothing is dropped.
+pub fn topo_sort_blockers(tasks: &Value) -> Result<Value> {
+    let arr = tasks
+        .as_array()
+        .ok_or_else(|| anyhow!("expected a task array to sort, got: {tasks}"))?;
+
+    // id -> task object, for tasks with an integer id (BTreeMap keeps id order).
+    let mut by_id: BTreeMap<i64, Value> = BTreeMap::new();
+    for t in arr {
+        if let Some(id) = t.get("id").and_then(Value::as_i64) {
+            by_id.insert(id, t.clone());
+        }
+    }
+    let present: BTreeSet<i64> = by_id.keys().copied().collect();
+
+    // Collect edges (a, b) meaning "a must come before b" from blocking relations
+    // between tasks that are both in the result set.
+    let related_ids = |t: &Value, kind: &str| -> Vec<i64> {
+        t.get("related_tasks")
+            .and_then(|r| r.get(kind))
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|x| x.get("id").and_then(Value::as_i64)).collect())
+            .unwrap_or_default()
+    };
+    let mut edges: BTreeSet<(i64, i64)> = BTreeSet::new();
+    for (&id, t) in &by_id {
+        for j in related_ids(t, "blocking") {
+            if id != j && present.contains(&j) {
+                edges.insert((id, j));
+            }
+        }
+        for j in related_ids(t, "blocked") {
+            if id != j && present.contains(&j) {
+                edges.insert((j, id));
+            }
+        }
+    }
+
+    // Kahn's algorithm, always taking the smallest available id.
+    let mut adj: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    let mut indeg: BTreeMap<i64, usize> = present.iter().map(|&id| (id, 0)).collect();
+    for &(a, b) in &edges {
+        adj.entry(a).or_default().push(b);
+        *indeg.get_mut(&b).unwrap() += 1;
+    }
+    let mut ready: BTreeSet<i64> = indeg
+        .iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(&id, _)| id)
+        .collect();
+    let mut order: Vec<i64> = Vec::with_capacity(present.len());
+    while let Some(&n) = ready.iter().next() {
+        ready.remove(&n);
+        order.push(n);
+        if let Some(succs) = adj.get(&n) {
+            for &m in succs {
+                let d = indeg.get_mut(&m).unwrap();
+                *d -= 1;
+                if *d == 0 {
+                    ready.insert(m);
+                }
+            }
+        }
+    }
+    // Anything left was part of a cycle — append in id order so nothing is lost.
+    let placed: BTreeSet<i64> = order.iter().copied().collect();
+    order.extend(present.iter().filter(|id| !placed.contains(id)));
+
+    let sorted: Vec<Value> = order.iter().filter_map(|id| by_id.get(id).cloned()).collect();
+    Ok(Value::Array(sorted))
 }
 
 /// Create a task in a project via `PUT /projects/{id}/tasks`.
@@ -161,4 +239,76 @@ pub fn embed_attachments(c: &VikunjaClient, task_id: i64, uploaded: &Value) -> R
 
     // Merge so we don't reset the task's done/priority/etc. (see merge_and_update).
     merge_and_update(c, task_id, &json!({ "description": description }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::topo_sort_blockers;
+    use serde_json::{json, Value};
+
+    fn ids(v: &Value) -> Vec<i64> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_i64().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn no_relations_sorts_by_id() {
+        let tasks = json!([{"id":3}, {"id":1}, {"id":2}]);
+        assert_eq!(ids(&topo_sort_blockers(&tasks).unwrap()), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn blocking_comes_before_blocked() {
+        // 2 blocks 1: blocker 2 must come first even though 1 < 2.
+        let tasks = json!([
+            {"id":1},
+            {"id":2, "related_tasks": {"blocking": [{"id":1}]}},
+        ]);
+        assert_eq!(ids(&topo_sort_blockers(&tasks).unwrap()), vec![2, 1]);
+    }
+
+    #[test]
+    fn blocked_direction_is_equivalent() {
+        // 1 is blocked by 2 -> 2 before 1.
+        let tasks = json!([
+            {"id":1, "related_tasks": {"blocked": [{"id":2}]}},
+            {"id":2},
+        ]);
+        assert_eq!(ids(&topo_sort_blockers(&tasks).unwrap()), vec![2, 1]);
+    }
+
+    #[test]
+    fn chain_with_id_tiebreak() {
+        // 10 blocks 5, 5 blocks 1, plus standalone 2. Ties broken by id.
+        let tasks = json!([
+            {"id":1},
+            {"id":5, "related_tasks": {"blocking": [{"id":1}]}},
+            {"id":10, "related_tasks": {"blocking": [{"id":5}]}},
+            {"id":2},
+        ]);
+        assert_eq!(ids(&topo_sort_blockers(&tasks).unwrap()), vec![2, 10, 5, 1]);
+    }
+
+    #[test]
+    fn relations_outside_set_are_ignored() {
+        // 2 blocks 99 (absent) -> no constraint, fall back to id order.
+        let tasks = json!([
+            {"id":2, "related_tasks": {"blocking": [{"id":99}]}},
+            {"id":1},
+        ]);
+        assert_eq!(ids(&topo_sort_blockers(&tasks).unwrap()), vec![1, 2]);
+    }
+
+    #[test]
+    fn cycle_keeps_all_tasks() {
+        // 1<->2 blocking cycle: broken by id order, nothing dropped.
+        let tasks = json!([
+            {"id":1, "related_tasks": {"blocking": [{"id":2}]}},
+            {"id":2, "related_tasks": {"blocking": [{"id":1}]}},
+        ]);
+        assert_eq!(ids(&topo_sort_blockers(&tasks).unwrap()), vec![1, 2]);
+    }
 }

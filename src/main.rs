@@ -82,6 +82,9 @@ struct ListArgs {
     /// Only tasks assigned to me (the configured username/id)
     #[arg(long)]
     mine: bool,
+    /// Reorder results in blocker order (client-side topological sort, id tie-break)
+    #[arg(long)]
+    topo_sort: bool,
     /// Maximum number of tasks to return
     #[arg(long, default_value_t = 50)]
     per_page: u32,
@@ -242,7 +245,7 @@ fn main() -> Result<()> {
             let ctx = cli.ctx()?;
             let project_id = ctx.project_id()?;
             let assignee_id = if a.mine { Some(ctx.me_id()?) } else { None };
-            commands::list(
+            let tasks = commands::list(
                 &ctx.client,
                 project_id,
                 a.done,
@@ -252,7 +255,12 @@ fn main() -> Result<()> {
                 a.order_by.as_deref(),
                 a.search.as_deref(),
                 a.per_page,
-            )?
+            )?;
+            if a.topo_sort {
+                commands::topo_sort_blockers(&tasks)?
+            } else {
+                tasks
+            }
         }
 
         Command::Create(a) => {

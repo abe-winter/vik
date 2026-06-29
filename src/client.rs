@@ -18,6 +18,13 @@ pub struct VikunjaClient {
 
 impl VikunjaClient {
     pub fn new(server: &str, token: &str) -> Result<Self> {
+        // Default to https when the configured server omits a scheme, otherwise
+        // reqwest rejects the relative URL.
+        let server = if server.contains("://") {
+            server.to_string()
+        } else {
+            format!("https://{server}")
+        };
         let base = format!("{}/api/v1", server.trim_end_matches('/'));
         let http = Client::builder().build().context("building http client")?;
         Ok(Self {

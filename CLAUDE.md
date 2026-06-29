@@ -1,3 +1,7 @@
+# nono
+
+You will probably be working inside a nono sandbox. LMK if you get stuck, I'd rather fix the permissions than make you discover a workaround every time
+
 # beads
 
 this repo uses beads for task tracking. useful commands are:

@@ -10,9 +10,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
-    /// Part of the documented config schema (README). Not consumed yet; kept so
-    /// the file parses and for a future "assign me" default.
-    #[allow(dead_code)]
+    /// Your username/id; used by --mine on `list` and `modify`.
     pub username: Option<String>,
     pub server: Option<String>,
     pub project: Option<String>,

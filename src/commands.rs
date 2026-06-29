@@ -34,6 +34,7 @@ pub fn list(
     c: &VikunjaClient,
     project_id: i64,
     done: Option<bool>,
+    assignee_id: Option<i64>,
     filter: Option<&str>,
     sort_by: Option<&str>,
     order_by: Option<&str>,
@@ -43,6 +44,9 @@ pub fn list(
     let mut clauses = vec![format!("project_id = {project_id}")];
     if let Some(d) = done {
         clauses.push(format!("done = {d}"));
+    }
+    if let Some(uid) = assignee_id {
+        clauses.push(format!("assignees in {uid}"));
     }
     if let Some(f) = filter {
         clauses.push(format!("({f})"));

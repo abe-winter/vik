@@ -28,6 +28,10 @@ struct Cli {
     #[arg(long, global = true)]
     project: Option<String>,
 
+    /// Your user id or username, for --mine (overrides config `username`)
+    #[arg(long, global = true)]
+    username: Option<String>,
+
     /// Path to a config file (default: ./.vikunja.yaml, ./vikunja.yaml, ~/.vikunja.yaml)
     #[arg(long, global = true)]
     config: Option<std::path::PathBuf>,
@@ -75,6 +79,9 @@ struct ListArgs {
     /// Search task text
     #[arg(long, short = 's')]
     search: Option<String>,
+    /// Only tasks assigned to me (the configured username/id)
+    #[arg(long)]
+    mine: bool,
     /// Maximum number of tasks to return
     #[arg(long, default_value_t = 50)]
     per_page: u32,
@@ -121,8 +128,11 @@ struct ModifyArgs {
     #[arg(long)]
     percent_done: Option<f64>,
     /// Assign a user to the task: numeric id, or username (needs /users token scope)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "mine")]
     assignee: Option<String>,
+    /// Assign the task to me (the configured username/id)
+    #[arg(long)]
+    mine: bool,
 }
 
 #[derive(Args)]
@@ -151,10 +161,11 @@ struct AttachArgs {
     embed: bool,
 }
 
-/// A constructed client plus the unresolved project string from flags/config.
+/// A constructed client plus the unresolved project/username from flags/config.
 struct Ctx {
     client: VikunjaClient,
     project: Option<String>,
+    username: Option<String>,
 }
 
 impl Ctx {
@@ -165,6 +176,18 @@ impl Ctx {
             .as_deref()
             .context("no project: pass --project or set `project:` in the config file")?;
         self.client.resolve_project(p)
+    }
+
+    /// Resolve "me" (the configured username/id) to a numeric user id, for
+    /// --mine. A numeric value skips the /users lookup, same as --assignee.
+    fn me_id(&self) -> Result<i64> {
+        let u = self
+            .username
+            .as_deref()
+            .context("no username: pass --username or set `username:` in config (needed for --mine)")?;
+        self.client.resolve_user(u).with_context(|| {
+            format!("resolving username '{u}' — set a numeric user id in config if your token lacks /users access")
+        })
     }
 }
 
@@ -182,9 +205,11 @@ impl Cli {
             .clone()
             .context("no token: pass --token or set VIKUNJA_TOKEN")?;
         let project = self.project.clone().or(cfg.project);
+        let username = self.username.clone().or(cfg.username);
         Ok(Ctx {
             client: VikunjaClient::new(&server, &token, self.debug)?,
             project,
+            username,
         })
     }
 }
@@ -215,10 +240,13 @@ fn main() -> Result<()> {
 
         Command::List(a) => {
             let ctx = cli.ctx()?;
+            let project_id = ctx.project_id()?;
+            let assignee_id = if a.mine { Some(ctx.me_id()?) } else { None };
             commands::list(
                 &ctx.client,
-                ctx.project_id()?,
+                project_id,
                 a.done,
+                assignee_id,
                 a.filter.as_deref(),
                 a.sort_by.as_deref(),
                 a.order_by.as_deref(),
@@ -250,11 +278,15 @@ fn main() -> Result<()> {
                 due_date: a.due_date.clone(),
                 percent_done: a.percent_done,
             };
-            let assignee_id = match &a.assignee {
-                Some(u) => Some(ctx.client.resolve_user(u).with_context(|| {
-                    format!("resolving assignee '{u}' — pass a numeric user id if your token lacks /users access")
-                })?),
-                None => None,
+            let assignee_id = if a.mine {
+                Some(ctx.me_id()?)
+            } else {
+                match &a.assignee {
+                    Some(u) => Some(ctx.client.resolve_user(u).with_context(|| {
+                        format!("resolving assignee '{u}' — pass a numeric user id if your token lacks /users access")
+                    })?),
+                    None => None,
+                }
             };
             commands::modify(&ctx.client, a.id, &task, assignee_id)?
         }

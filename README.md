@@ -26,7 +26,7 @@ Precedence for every setting is flag > env > config file.
 # vikunja.yaml
 server: vikunja.example.com   # scheme optional; defaults to https://
 project: 13                   # id, or a project name/identifier
-username: me                  # optional
+username: me                  # used by --mine; numeric id skips the /users lookup
 ```
 
 ```sh
@@ -36,12 +36,14 @@ vik projects                                   # list projects (find an id)
 vik list                                       # tasks in the configured project
 vik list --done false --sort-by priority --order-by desc
 vik list -s "search text" --filter "priority >= 4"
+vik list --mine                                # tasks assigned to me (config username)
 
 vik create "write the docs" --priority 3 --due-date 2026-07-01T17:00:00Z
 echo "long body" | vik create "task" --description -
 
 vik modify 25 --done true --priority 5         # safe partial update (read-merge-write)
 vik modify 25 --assignee 2                      # assignee by id (username needs /users token scope)
+vik modify 25 --mine                            # assign to me (config username)
 
 vik comment 25 "looks good"
 git log -1 --format=%B | vik comment 25 -       # comment body from stdin

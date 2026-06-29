@@ -1,0 +1,6 @@
+# The nono sandbox blocks the default temp dir (/tmp) but allows /tmp/claude-$UID.
+# The C linker (cc/collect2) writes intermediate files to TMPDIR, so point it at
+# the allowed dir. Without this, `cargo build` fails with
+# "Cannot create temporary file in /tmp/: Permission denied".
+[env]
+TMPDIR = "/tmp/claude-1000"

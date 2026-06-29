@@ -16,9 +16,18 @@
 # Note: this intentionally blocks `cargo install` (it writes ~/.cargo/bin).
 set -euo pipefail
 
+# The base `system_read_linux_core` group grants read+exec on /usr/bin (so gcc,
+# as, ld run) but not /usr/libexec/gcc, where gcc keeps `collect2` (the final
+# link step for *every* Rust binary) and `cc1` (compiles C deps like ring). nono
+# read access includes execute, so a read grant here is enough to let the linker
+# run. Without it `cargo build` dies with "execv: Permission denied" on collect2.
 exec nono run \
   --profile claude \
+  --allow-cwd \
   --allow "$HOME/.cargo/registry" \
   --allow "$HOME/.cargo/git" \
   --allow-file "$HOME/.cargo/.package-cache" \
+  --allow ~/.dolt \
+  --read /usr \
+  --allow /tmp \
   -- claude --permission-mode auto "$@"

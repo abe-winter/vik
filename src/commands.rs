@@ -3,11 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
 use crate::client::VikunjaClient;
 use crate::models::{AssigneeWrite, CommentWrite, TaskWrite};
+use crate::TaskState;
 
 /// Apply field overrides to a task with read-merge-write semantics.
 ///
@@ -34,7 +35,7 @@ fn merge_and_update(c: &VikunjaClient, id: i64, overrides: &Value) -> Result<Val
 pub fn list(
     c: &VikunjaClient,
     project_id: i64,
-    done: Option<bool>,
+    done: Option<TaskState>,
     assignee: Option<&str>,
     filter: Option<&str>,
     sort_by: Option<&str>,
@@ -43,8 +44,12 @@ pub fn list(
     per_page: u32,
 ) -> Result<Value> {
     let mut clauses = vec![format!("project_id = {project_id}")];
-    if let Some(d) = done {
-        clauses.push(format!("done = {d}"));
+    // Map the tri-state status onto done/percent_done (see TaskState).
+    match done {
+        Some(TaskState::Todo) => clauses.push("done = false && percent_done = 0".into()),
+        Some(TaskState::Doing) => clauses.push("done = false && percent_done > 0".into()),
+        Some(TaskState::Done) => clauses.push("done = true".into()),
+        None => {}
     }
     if let Some(u) = assignee {
         // The filter query matches assignees by username (the assignees *endpoint*
@@ -68,7 +73,18 @@ pub fn list(
     if let Some(o) = order_by {
         query.push(("order_by", o.to_string()));
     }
-    c.get("/tasks", &query)
+    let tasks = c.get("/tasks", &query)?;
+
+    // The /tasks filter endpoint returns 200 with an empty array both for a
+    // genuinely empty project and for one the token can't access — silently
+    // hiding a permission problem. When the result is empty, probe the project
+    // directly so we can surface a real error instead of a misleading [].
+    if tasks.as_array().is_some_and(|a| a.is_empty()) && !c.project_accessible(project_id)? {
+        bail!(
+            "no access to project {project_id} (it may not exist, or your token lacks permission)"
+        );
+    }
+    Ok(tasks)
 }
 
 /// Reorder a task array (the `list` response) into blocker order via a
@@ -237,21 +253,31 @@ pub fn modify(
     task: &TaskWrite,
     assignee_id: Option<i64>,
 ) -> Result<Value> {
-    let mut result: Option<Value> = None;
     // Serialize to a JSON object containing only the fields the user set
     // (TaskWrite skips None), then merge onto the current task.
     let overrides = serde_json::to_value(task)?;
-    if !overrides.as_object().map(|m| m.is_empty()).unwrap_or(true) {
-        result = Some(merge_and_update(c, id, &overrides)?);
+    let changed_fields = !overrides.as_object().map(|m| m.is_empty()).unwrap_or(true);
+    if !changed_fields && assignee_id.is_none() {
+        bail!("nothing to modify: pass a field to change or --assignee");
+    }
+    if changed_fields {
+        merge_and_update(c, id, &overrides)?;
     }
     if let Some(uid) = assignee_id {
-        let r = c.put_json(
+        if let Err(e) = c.put_json(
             &format!("/tasks/{id}/assignees"),
             &AssigneeWrite { user_id: uid },
-        )?;
-        result = result.or(Some(r));
+        ) {
+            // Claiming a task you already hold is a no-op success, not a failure:
+            // Vikunja error code 4021 ("already assigned"). Anything else is real.
+            if !e.to_string().contains("4021") {
+                return Err(e);
+            }
+        }
     }
-    result.ok_or_else(|| anyhow!("nothing to modify: pass a field to change or --assignee"))
+    // Return the resulting task (not the terse assignee-PUT response, which was
+    // just `{"Created": ..., "user_id": N}`) so the caller can see what changed.
+    c.get(&format!("/tasks/{id}"), &[])
 }
 
 /// Add a comment to a task via `PUT /tasks/{id}/comments`.

@@ -5,22 +5,27 @@ this repo uses vikunja for task tracking via the `vik` CLI.
 Useful commands:
 
 ```sh
-# list undone tasks you've claimed (to restore context in case you got interrupted)
-vik list --mine --done false --compact
+# list unfinished tasks you've claimed (to restore context in case you got interrupted).
+# --done takes todo/doing/done; use a raw filter for "anything not done" (todo + doing).
+vik list --mine --filter 'done = false' --compact
+
+# list just what you've got in progress
+vik list --mine --done doing --compact
 
 # list tasks in blocker order
-vik list --topo-sort --done false --compact
+vik list --topo-sort --filter 'done = false' --compact
 
-# claim a task
+# claim a task, then mark it in progress
 vik modify $TASK_ID --mine
+vik modify $TASK_ID --done doing
 
 # when a task is done, close it
-vik modify $TASK_ID --done true
+vik modify $TASK_ID --done done
 git commit ... # also commit the changes here, unless nothing changed
 
 # for research tasks, add results as a comment.
 # use `-` instead of text to if you want to read stdin.
-# note this is html, not markdown
+# note this is html, not markdown; pandoc is good for converting.
 vik comment $TASK "comment goes here"
 
 # you can also attach or download media with:

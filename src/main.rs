@@ -6,7 +6,7 @@ mod models;
 use std::io::Read;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use client::VikunjaClient;
 use config::Config;
 use models::TaskWrite;
@@ -44,6 +44,20 @@ struct Cli {
     command: Command,
 }
 
+/// Tri-state task status. Vikunja has no native "in progress" field, so we map
+/// the middle state onto `percent_done`: a not-done task with any progress > 0 is
+/// "doing". (todo = not done & 0%, doing = not done & >0%, done = done.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TaskState {
+    Todo,
+    Doing,
+    Done,
+}
+
+/// The `percent_done` value used to mark a task as "doing" when no explicit
+/// `--percent-done` is given. Halfway reads as "in progress" in the Vikunja UI.
+const DOING_PERCENT: f64 = 0.5;
+
 #[derive(Subcommand)]
 enum Command {
     /// List projects you have access to (helper to find a project id)
@@ -66,9 +80,9 @@ enum Command {
 
 #[derive(Args)]
 struct ListArgs {
-    /// Filter by done status: --done true or --done false
-    #[arg(long)]
-    done: Option<bool>,
+    /// Filter by status: --done todo, doing, or done
+    #[arg(long, value_enum)]
+    done: Option<TaskState>,
     /// Raw Vikunja filter expression, ANDed with the project filter
     #[arg(long)]
     filter: Option<String>,
@@ -123,9 +137,10 @@ struct ModifyArgs {
     /// New description (use - to read from stdin)
     #[arg(long)]
     description: Option<String>,
-    /// Mark done/undone: --done true or --done false
-    #[arg(long)]
-    done: Option<bool>,
+    /// Set status: --done todo, doing, or done. "doing" sets percent_done (see
+    /// --percent-done to override the value).
+    #[arg(long, value_enum)]
+    done: Option<TaskState>,
     /// Priority, 0-5
     #[arg(long)]
     priority: Option<i64>,
@@ -298,13 +313,24 @@ fn main() -> Result<()> {
 
         Command::Modify(a) => {
             let ctx = cli.ctx()?;
+            // Translate the tri-state status into the underlying done/percent_done
+            // fields. An explicit --percent-done overrides the state's default.
+            let (done, mut percent_done) = match a.done {
+                Some(TaskState::Todo) => (Some(false), Some(0.0)),
+                Some(TaskState::Doing) => (Some(false), Some(DOING_PERCENT)),
+                Some(TaskState::Done) => (Some(true), None),
+                None => (None, None),
+            };
+            if a.percent_done.is_some() {
+                percent_done = a.percent_done;
+            }
             let task = TaskWrite {
                 title: a.title.clone(),
                 description: read_dash(a.description.clone())?,
-                done: a.done,
+                done,
                 priority: a.priority,
                 due_date: a.due_date.clone(),
-                percent_done: a.percent_done,
+                percent_done,
             };
             let assignee_id = if a.mine {
                 Some(ctx.me_id()?)

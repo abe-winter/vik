@@ -102,6 +102,37 @@ impl VikunjaClient {
         self.send(self.http.put(self.url(path)).multipart(form))
     }
 
+    /// Whether the token can access the given project. Distinguishes a real
+    /// permission/existence problem (403/404 → `false`) from other errors (which
+    /// propagate). Used to turn an ambiguous empty task list into a clear error.
+    pub fn project_accessible(&self, id: i64) -> Result<bool> {
+        let req = self
+            .http
+            .get(self.url(&format!("/projects/{id}")))
+            .bearer_auth(&self.token)
+            .build()
+            .context("building request")?;
+        if self.debug {
+            eprintln!("[vik] {} {}", req.method(), req.url());
+        }
+        let resp = self
+            .http
+            .execute(req)
+            .context("sending request to vikunja")?;
+        let status = resp.status();
+        if self.debug {
+            eprintln!("[vik] -> {status}");
+        }
+        if status.is_success() {
+            return Ok(true);
+        }
+        if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        let text = resp.text().unwrap_or_default();
+        bail!("vikunja API returned {status}: {}", text.trim());
+    }
+
     // --- name -> id resolution ---
 
     /// Resolve a project given an id ("5") or a name/identifier. Numeric input is

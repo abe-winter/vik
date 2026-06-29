@@ -15,9 +15,9 @@ vik list --mine --done doing --compact
 # list tasks in blocker order
 vik list --topo-sort --filter 'done = false' --compact
 
-# claim a task, then mark it in progress
-vik modify $TASK_ID --mine
-vik modify $TASK_ID --done doing
+# claim a task, then mark it in progress (--compact trims the returned task)
+vik modify $TASK_ID --mine --compact
+vik modify $TASK_ID --done doing --compact
 
 # when a task is done, close it
 vik modify $TASK_ID --done done

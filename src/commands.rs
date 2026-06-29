@@ -175,7 +175,8 @@ pub fn compact_tasks(tasks: &Value) -> Value {
     }
 }
 
-fn compact_task(t: &Value) -> Value {
+/// Project a single task down to its high-signal fields (see `compact_tasks`).
+pub fn compact_task(t: &Value) -> Value {
     let mut o = serde_json::Map::new();
     let mut put = |k: &str, v: Value| {
         o.insert(k.to_string(), v);

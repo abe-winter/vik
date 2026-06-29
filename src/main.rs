@@ -156,6 +156,9 @@ struct ModifyArgs {
     /// Assign the task to me (the configured username/id)
     #[arg(long)]
     mine: bool,
+    /// Trim the returned task to a few high-signal fields to save context
+    #[arg(long)]
+    compact: bool,
 }
 
 #[derive(Args)]
@@ -342,7 +345,12 @@ fn main() -> Result<()> {
                     None => None,
                 }
             };
-            commands::modify(&ctx.client, a.id, &task, assignee_id)?
+            let updated = commands::modify(&ctx.client, a.id, &task, assignee_id)?;
+            if a.compact {
+                commands::compact_task(&updated)
+            } else {
+                updated
+            }
         }
 
         Command::Comment(a) => {

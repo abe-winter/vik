@@ -26,7 +26,7 @@ Precedence for every setting is flag > env > config file.
 # vikunja.yaml
 server: vikunja.example.com   # scheme optional; defaults to https://
 project: 13                   # id, or a project name/identifier
-username: me                  # used by --mine; numeric id skips the /users lookup
+username: me                  # used by --mine (list filters by it; modify resolves it to a user id)
 ```
 
 ```sh

@@ -35,7 +35,7 @@ pub fn list(
     c: &VikunjaClient,
     project_id: i64,
     done: Option<bool>,
-    assignee_id: Option<i64>,
+    assignee: Option<&str>,
     filter: Option<&str>,
     sort_by: Option<&str>,
     order_by: Option<&str>,
@@ -46,8 +46,10 @@ pub fn list(
     if let Some(d) = done {
         clauses.push(format!("done = {d}"));
     }
-    if let Some(uid) = assignee_id {
-        clauses.push(format!("assignees in {uid}"));
+    if let Some(u) = assignee {
+        // The filter query matches assignees by username (the assignees *endpoint*
+        // uses numeric ids, but the filter does not).
+        clauses.push(format!("assignees in {u}"));
     }
     if let Some(f) = filter {
         clauses.push(format!("({f})"));

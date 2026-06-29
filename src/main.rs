@@ -181,13 +181,17 @@ impl Ctx {
         self.client.resolve_project(p)
     }
 
-    /// Resolve "me" (the configured username/id) to a numeric user id, for
-    /// --mine. A numeric value skips the /users lookup, same as --assignee.
-    fn me_id(&self) -> Result<i64> {
-        let u = self
-            .username
+    /// The configured username/id (for --mine). Required when --mine is used.
+    fn me(&self) -> Result<&str> {
+        self.username
             .as_deref()
-            .context("no username: pass --username or set `username:` in config (needed for --mine)")?;
+            .context("no username: pass --username or set `username:` in config (needed for --mine)")
+    }
+
+    /// Resolve "me" to a numeric user id, for assigning via the assignees
+    /// endpoint. A numeric value skips the /users lookup, same as --assignee.
+    fn me_id(&self) -> Result<i64> {
+        let u = self.me()?;
         self.client.resolve_user(u).with_context(|| {
             format!("resolving username '{u}' — set a numeric user id in config if your token lacks /users access")
         })
@@ -244,12 +248,12 @@ fn main() -> Result<()> {
         Command::List(a) => {
             let ctx = cli.ctx()?;
             let project_id = ctx.project_id()?;
-            let assignee_id = if a.mine { Some(ctx.me_id()?) } else { None };
+            let mine = if a.mine { Some(ctx.me()?.to_string()) } else { None };
             let tasks = commands::list(
                 &ctx.client,
                 project_id,
                 a.done,
-                assignee_id,
+                mine.as_deref(),
                 a.filter.as_deref(),
                 a.sort_by.as_deref(),
                 a.order_by.as_deref(),

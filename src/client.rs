@@ -5,7 +5,10 @@
 //! bodies live in `models`. A couple of resolution helpers parse just enough of
 //! a response to turn a project/user name into an id.
 
+use std::path::PathBuf;
+
 use anyhow::{anyhow, bail, Context, Result};
+use reqwest::blocking::multipart::{Form, Part};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use serde::Serialize;
 use serde_json::Value;
@@ -70,6 +73,16 @@ impl VikunjaClient {
 
     pub fn post_json<T: Serialize>(&self, path: &str, body: &T) -> Result<Value> {
         self.send(self.http.post(self.url(path)).json(body))
+    }
+
+    /// Upload one or more files as multipart form-data under the `files` field.
+    pub fn put_multipart_files(&self, path: &str, files: &[PathBuf]) -> Result<Value> {
+        let mut form = Form::new();
+        for f in files {
+            let part = Part::file(f).with_context(|| format!("reading {}", f.display()))?;
+            form = form.part("files", part);
+        }
+        self.send(self.http.put(self.url(path)).multipart(form))
     }
 
     // --- name -> id resolution ---

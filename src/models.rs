@@ -20,18 +20,6 @@ pub struct TaskWrite {
     pub percent_done: Option<f64>,
 }
 
-impl TaskWrite {
-    /// Whether any field is set (i.e. there is something to send).
-    pub fn is_empty(&self) -> bool {
-        self.title.is_none()
-            && self.description.is_none()
-            && self.done.is_none()
-            && self.priority.is_none()
-            && self.due_date.is_none()
-            && self.percent_done.is_none()
-    }
-}
-
 #[derive(Debug, Serialize)]
 pub struct CommentWrite {
     pub comment: String,

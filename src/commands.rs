@@ -1,10 +1,31 @@
 //! Command implementations. Each returns the raw API JSON for `main` to print.
 
+use std::path::PathBuf;
+
 use anyhow::{anyhow, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::client::VikunjaClient;
 use crate::models::{AssigneeWrite, CommentWrite, TaskWrite};
+
+/// Apply field overrides to a task with read-merge-write semantics.
+///
+/// Vikunja's `POST /tasks/{id}` resets omitted value-type fields (done,
+/// priority, percent_done, ...) to their zero value instead of preserving them,
+/// so a true partial update must re-send the whole task. We fetch the current
+/// task, overlay the provided fields, and post the merged object back.
+fn merge_and_update(c: &VikunjaClient, id: i64, overrides: &Value) -> Result<Value> {
+    let mut full = c.get(&format!("/tasks/{id}"), &[])?;
+    let obj = full
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("task {id} response is not a JSON object"))?;
+    if let Some(map) = overrides.as_object() {
+        for (k, v) in map {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    c.post_json(&format!("/tasks/{id}"), &full)
+}
 
 /// List tasks in a project via `GET /tasks`, scoped with a `project_id` filter
 /// clause (optionally ANDed with a `done` status and a raw user filter).
@@ -58,8 +79,11 @@ pub fn modify(
     assignee_id: Option<i64>,
 ) -> Result<Value> {
     let mut result: Option<Value> = None;
-    if !task.is_empty() {
-        result = Some(c.post_json(&format!("/tasks/{id}"), task)?);
+    // Serialize to a JSON object containing only the fields the user set
+    // (TaskWrite skips None), then merge onto the current task.
+    let overrides = serde_json::to_value(task)?;
+    if !overrides.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+        result = Some(merge_and_update(c, id, &overrides)?);
     }
     if let Some(uid) = assignee_id {
         let r = c.put_json(
@@ -79,4 +103,58 @@ pub fn comment(c: &VikunjaClient, id: i64, text: &str) -> Result<Value> {
             comment: text.to_string(),
         },
     )
+}
+
+/// List a task's attachments via `GET /tasks/{id}/attachments`.
+pub fn attachments(c: &VikunjaClient, task_id: i64) -> Result<Value> {
+    c.get(&format!("/tasks/{task_id}/attachments"), &[])
+}
+
+/// Upload files to a task via `PUT /tasks/{id}/attachments`.
+pub fn attach(c: &VikunjaClient, task_id: i64, files: &[PathBuf]) -> Result<Value> {
+    c.put_multipart_files(&format!("/tasks/{task_id}/attachments"), files)
+}
+
+/// Append markdown image embeds for freshly-uploaded attachments to the task's
+/// description. Vikunja embeds attachments as
+/// `![name](/api/v1/tasks/{taskID}/attachments/{attachmentID})`. Returns the
+/// updated task.
+pub fn embed_attachments(c: &VikunjaClient, task_id: i64, uploaded: &Value) -> Result<Value> {
+    // The upload response wraps the created attachments in a `success` array.
+    let items = uploaded
+        .get("success")
+        .and_then(Value::as_array)
+        .or_else(|| uploaded.get("attachments").and_then(Value::as_array))
+        .or_else(|| uploaded.as_array())
+        .ok_or_else(|| anyhow!("could not find created attachments in upload response: {uploaded}"))?;
+
+    let mut embeds = Vec::new();
+    for a in items {
+        let aid = a
+            .get("id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("attachment missing id: {a}"))?;
+        let name = a
+            .get("file")
+            .and_then(|f| f.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("attachment");
+        embeds.push(format!(
+            "![{name}](/api/v1/tasks/{task_id}/attachments/{aid})"
+        ));
+    }
+
+    let task = c.get(&format!("/tasks/{task_id}"), &[])?;
+    let mut description = task
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if !description.is_empty() {
+        description.push_str("\n\n");
+    }
+    description.push_str(&embeds.join("\n"));
+
+    // Merge so we don't reset the task's done/priority/etc. (see merge_and_update).
+    merge_and_update(c, task_id, &json!({ "description": description }))
 }

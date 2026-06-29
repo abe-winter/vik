@@ -48,6 +48,10 @@ enum Command {
     Modify(ModifyArgs),
     /// Add a comment to a task
     Comment(CommentArgs),
+    /// List a task's attachments
+    Attachments(AttachmentsArgs),
+    /// Upload file attachment(s) to a task
+    Attach(AttachArgs),
 }
 
 #[derive(Args)]
@@ -123,6 +127,24 @@ struct CommentArgs {
     id: i64,
     /// Comment text (use - to read from stdin)
     comment: String,
+}
+
+#[derive(Args)]
+struct AttachmentsArgs {
+    /// Task id
+    id: i64,
+}
+
+#[derive(Args)]
+struct AttachArgs {
+    /// Task id
+    id: i64,
+    /// One or more files to upload
+    #[arg(required = true)]
+    files: Vec<std::path::PathBuf>,
+    /// Also embed each uploaded image into the task description as markdown
+    #[arg(long)]
+    embed: bool,
 }
 
 /// A constructed client plus the unresolved project string from flags/config.
@@ -237,6 +259,18 @@ fn main() -> Result<()> {
             let ctx = cli.ctx()?;
             let text = read_dash(Some(a.comment.clone()))?.unwrap_or_default();
             commands::comment(&ctx.client, a.id, &text)?
+        }
+
+        Command::Attachments(a) => commands::attachments(&cli.ctx()?.client, a.id)?,
+
+        Command::Attach(a) => {
+            let ctx = cli.ctx()?;
+            let uploaded = commands::attach(&ctx.client, a.id, &a.files)?;
+            if a.embed {
+                commands::embed_attachments(&ctx.client, a.id, &uploaded)?
+            } else {
+                uploaded
+            }
         }
     };
     print_json(&out)

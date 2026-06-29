@@ -70,9 +70,16 @@ created `models.Task` (with `id`, `identifier`, `index`).
 
 ### Modify a task (state, etc.)
 
-`POST /tasks/{id}` with body `models.Task` (partial update — send only fields to change).
-Use for `done`, `title`, `description`, `priority`, `percent_done`, `due_date`, …
-`GET /tasks/{id}` fetches one task (query `expand=subtasks|comments|reactions|buckets`).
+`POST /tasks/{id}` with body `models.Task`. `GET /tasks/{id}` fetches one task
+(query `expand=subtasks|comments|reactions|buckets`).
+
+**Gotcha — not a true partial update.** A `POST` with a subset of fields resets
+omitted **value-type** fields (`done`, `priority`, `percent_done`, …) to their
+zero value (false/0); omitted **string** fields like `title` are preserved.
+Verified live: posting only `description` flipped a `done=true, priority=5` task
+back to `done=false, priority=0`. So `vik` does **read-merge-write**: GET the
+task, overlay the changed fields, POST the full object back (this is what the
+Vikunja frontend does too). Applies to `modify` and to `attach --embed`.
 
 ### Change owner / assignee
 
@@ -105,12 +112,20 @@ Comment body is rendered as HTML/markdown by Vikunja.
 - `GET  /tasks/{id}/attachments/{attachmentID}` downloads the raw file bytes.
 - `DELETE /tasks/{id}/attachments/{attachmentID}` removes it.
 
-**Embeds:** to embed an image/PDF in a task description or comment, first upload it as an
-attachment, then reference it in the markdown/HTML. Vikunja's editor links attachments
-via the attachment download URL
-(`{server}/api/v1/tasks/{id}/attachments/{attachmentID}`) — e.g.
-`![alt]({server}/api/v1/tasks/{id}/attachments/{attachmentID})`. Exact embed markup to be
-confirmed against the running server during vik-eev.4.
+**Upload response shape (confirmed live):** the swagger says `models.Message`, but the
+endpoint actually returns `{ "errors": null, "success": [ <TaskAttachment>, ... ] }`,
+where each attachment has `id`, `task_id`, and `file: {id, name, mime, size}`.
+
+**Embeds (confirmed):** to embed an image in a task description, upload it as an
+attachment then add a relative-path markdown image to the description:
+
+```
+![<filename>](/api/v1/tasks/<taskID>/attachments/<attachmentID>)
+```
+
+The path is relative (`/api/v1/...`, no host); the Vikunja frontend resolves and
+authenticates it when rendering. `vik attach --embed` uploads, builds this line per
+file from the `success` array, and merges it into the description.
 
 ## Key model shapes (fields we use)
 

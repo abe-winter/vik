@@ -25,14 +25,15 @@ git commit ... # also commit the changes here, unless nothing changed
 
 # for research tasks, add results as a comment.
 # use `-` instead of text to if you want to read stdin.
-# note this is html, not markdown; pandoc is good for converting.
-vik comment $TASK "comment goes here"
+# comments/descriptions are stored as html; pass --md to write markdown
+# (converted to html for you via pandoc) and to read html back as markdown.
+vik comment $TASK --md "comment goes here"
 
 # you can also attach or download media with:
 vik attach ...
 vik attachments ...
 
-# read comments on an existing ticket.
+# read comments on an existing ticket (add --md for markdown instead of html).
 # this is useful in cases where we are exchanging feedback (but ideally we'll use matrix chat for that when available)
-vik comments $ID
+vik comments $ID --md
 ```

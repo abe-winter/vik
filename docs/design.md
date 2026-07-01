@@ -53,6 +53,15 @@ Discovery order (first match wins), per README "vikunja.yaml and .vikunja.yaml p
   response body verbatim (pretty-printed). No human-formatting layer in v0.
 - `--description -` reads the description from stdin (README requirement).
 
+## Markdown conversion (`--md`)
+
+Vikunja stores task descriptions and comments as HTML, but models prefer terse
+markdown. `--md` shells out to `pandoc` (gfm ↔ html): on setters (`create`,
+`modify`, `comment`) it converts the given markdown to HTML before sending; on
+getters (`list`, `comments`, and the task returned by `create`/`modify`) it
+converts the HTML fields back to markdown. Lives in `md.rs`. If pandoc is missing
+the command fails with a clear error (acceptable — it's an opt-in flag).
+
 ## Module layout
 
 ```
@@ -62,6 +71,7 @@ src/
   client.rs    VikunjaClient: reqwest wrapper, base url + bearer auth, request helpers
   models.rs    serde structs: Task, Project, TaskComment, TaskAttachment, ...
   commands.rs  one fn per verb: list, create, modify, comment (attachments in vik-eev.4)
+  md.rs        markdown <-> html conversion via pandoc, for the --md flag
 ```
 
 ## Crates (initial)

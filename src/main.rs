@@ -1,6 +1,7 @@
 mod client;
 mod commands;
 mod config;
+mod md;
 mod models;
 
 use std::io::Read;
@@ -104,6 +105,9 @@ struct ListArgs {
     /// Trim each task to a few high-signal fields to save context
     #[arg(long)]
     compact: bool,
+    /// Convert each task's HTML description to markdown in the output (needs pandoc)
+    #[arg(long)]
+    md: bool,
     /// Maximum number of tasks to return
     #[arg(long, default_value_t = 50)]
     per_page: u32,
@@ -125,6 +129,10 @@ struct CreateArgs {
     /// Percent done, 0.0-1.0
     #[arg(long)]
     percent_done: Option<f64>,
+    /// Treat --description as markdown and convert it to HTML before sending
+    /// (and convert the returned description back to markdown); needs pandoc
+    #[arg(long)]
+    md: bool,
 }
 
 #[derive(Args)]
@@ -159,6 +167,10 @@ struct ModifyArgs {
     /// Trim the returned task to a few high-signal fields to save context
     #[arg(long)]
     compact: bool,
+    /// Treat --description as markdown and convert it to HTML before sending
+    /// (and convert the returned description back to markdown); needs pandoc
+    #[arg(long)]
+    md: bool,
 }
 
 #[derive(Args)]
@@ -167,12 +179,19 @@ struct CommentArgs {
     id: i64,
     /// Comment text (use - to read from stdin)
     comment: String,
+    /// Treat the comment text as markdown and convert it to HTML before sending
+    /// (needs pandoc)
+    #[arg(long)]
+    md: bool,
 }
 
 #[derive(Args)]
 struct CommentsArgs {
     /// Task id
     id: i64,
+    /// Convert each comment's HTML to markdown in the output (needs pandoc)
+    #[arg(long)]
+    md: bool,
 }
 
 #[derive(Args)]
@@ -294,24 +313,36 @@ fn main() -> Result<()> {
             } else {
                 tasks
             };
-            if a.compact {
+            let mut tasks = if a.compact {
                 commands::compact_tasks(&tasks)
             } else {
                 tasks
+            };
+            if a.md {
+                md::field_to_md(&mut tasks, "description")?;
             }
+            tasks
         }
 
         Command::Create(a) => {
             let ctx = cli.ctx()?;
+            let mut description = read_dash(a.description.clone())?;
+            if a.md {
+                description = description.map(|d| md::md_to_html(&d)).transpose()?;
+            }
             let task = TaskWrite {
                 title: Some(a.title.clone()),
-                description: read_dash(a.description.clone())?,
+                description,
                 priority: a.priority,
                 due_date: a.due_date.clone(),
                 percent_done: a.percent_done,
                 done: None,
             };
-            commands::create(&ctx.client, ctx.project_id()?, &task)?
+            let mut created = commands::create(&ctx.client, ctx.project_id()?, &task)?;
+            if a.md {
+                md::field_to_md(&mut created, "description")?;
+            }
+            created
         }
 
         Command::Modify(a) => {
@@ -327,9 +358,13 @@ fn main() -> Result<()> {
             if a.percent_done.is_some() {
                 percent_done = a.percent_done;
             }
+            let mut description = read_dash(a.description.clone())?;
+            if a.md {
+                description = description.map(|d| md::md_to_html(&d)).transpose()?;
+            }
             let task = TaskWrite {
                 title: a.title.clone(),
-                description: read_dash(a.description.clone())?,
+                description,
                 done,
                 priority: a.priority,
                 due_date: a.due_date.clone(),
@@ -346,20 +381,33 @@ fn main() -> Result<()> {
                 }
             };
             let updated = commands::modify(&ctx.client, a.id, &task, assignee_id)?;
-            if a.compact {
+            let mut updated = if a.compact {
                 commands::compact_task(&updated)
             } else {
                 updated
+            };
+            if a.md {
+                md::field_to_md(&mut updated, "description")?;
             }
+            updated
         }
 
         Command::Comment(a) => {
             let ctx = cli.ctx()?;
-            let text = read_dash(Some(a.comment.clone()))?.unwrap_or_default();
+            let mut text = read_dash(Some(a.comment.clone()))?.unwrap_or_default();
+            if a.md {
+                text = md::md_to_html(&text)?;
+            }
             commands::comment(&ctx.client, a.id, &text)?
         }
 
-        Command::Comments(a) => commands::comments(&cli.ctx()?.client, a.id)?,
+        Command::Comments(a) => {
+            let mut comments = commands::comments(&cli.ctx()?.client, a.id)?;
+            if a.md {
+                md::field_to_md(&mut comments, "comment")?;
+            }
+            comments
+        }
 
         Command::Attachments(a) => commands::attachments(&cli.ctx()?.client, a.id)?,
 

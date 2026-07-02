@@ -36,4 +36,10 @@ vik attachments ...
 # read comments on an existing ticket (add --md for markdown instead of html).
 # this is useful in cases where we are exchanging feedback (but ideally we'll use matrix chat for that when available)
 vik comments $ID --md
+
+# poll the whole project for new replies since you last checked, to pick up
+# followups. tracks the last-seen time in .vik-last-reply (per project dir); the
+# first run just baselines (reports nothing) and later runs show what's new.
+# your own comments are skipped; --no-update peeks without consuming.
+vik replies --md
 ```

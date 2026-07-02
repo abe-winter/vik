@@ -73,6 +73,8 @@ enum Command {
     Comment(CommentArgs),
     /// List a task's comments
     Comments(CommentsArgs),
+    /// Poll the project for comments newer than the last check (for followups)
+    Replies(RepliesArgs),
     /// List a task's attachments
     Attachments(AttachmentsArgs),
     /// Upload file attachment(s) to a task
@@ -195,6 +197,29 @@ struct CommentsArgs {
 }
 
 #[derive(Args)]
+struct RepliesArgs {
+    /// Only report comments newer than this RFC3339 timestamp, instead of the
+    /// stored last-check time (e.g. to backfill: --since 2026-07-01T00:00:00Z)
+    #[arg(long)]
+    since: Option<String>,
+    /// Path to the state file tracking the last-seen timestamp (per project)
+    #[arg(long, default_value = ".vik-last-reply")]
+    state: std::path::PathBuf,
+    /// Don't advance the state file (peek at new replies without consuming them)
+    #[arg(long)]
+    no_update: bool,
+    /// Include comments you authored (excluded by default as they aren't followups)
+    #[arg(long)]
+    include_mine: bool,
+    /// Convert each comment's HTML to markdown in the output (needs pandoc)
+    #[arg(long)]
+    md: bool,
+    /// Maximum number of tasks to scan for comments
+    #[arg(long, default_value_t = 50)]
+    per_page: u32,
+}
+
+#[derive(Args)]
 struct AttachmentsArgs {
     /// Task id
     id: i64,
@@ -281,6 +306,25 @@ fn read_dash(value: Option<String>) -> Result<Option<String>> {
         }
         other => Ok(other),
     }
+}
+
+/// Read the last-seen timestamp from the replies state file. A missing or empty
+/// file means "never polled" (`None`), which triggers first-run baselining.
+fn read_state(path: &std::path::Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => {
+            let s = s.trim().to_string();
+            Ok(if s.is_empty() { None } else { Some(s) })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading state file {}", path.display())),
+    }
+}
+
+/// Write the last-seen timestamp to the replies state file.
+fn write_state(path: &std::path::Path, ts: &str) -> Result<()> {
+    std::fs::write(path, format!("{ts}\n"))
+        .with_context(|| format!("writing state file {}", path.display()))
 }
 
 fn print_json(v: &Value) -> Result<()> {
@@ -403,6 +447,38 @@ fn main() -> Result<()> {
 
         Command::Comments(a) => {
             let mut comments = commands::comments(&cli.ctx()?.client, a.id)?;
+            if a.md {
+                md::field_to_md(&mut comments, "comment")?;
+            }
+            comments
+        }
+
+        Command::Replies(a) => {
+            let ctx = cli.ctx()?;
+            let project_id = ctx.project_id()?;
+            // An explicit --since overrides (and does not read) the state file.
+            let since = match &a.since {
+                Some(s) => Some(s.clone()),
+                None => read_state(&a.state)?,
+            };
+            let result = commands::replies(
+                &ctx.client,
+                project_id,
+                since.as_deref(),
+                ctx.username.as_deref(),
+                a.include_mine,
+                a.per_page,
+            )?;
+            // Advance the state file to the newest comment seen, so the next poll
+            // is incremental. Only move forward, never backward.
+            if !a.no_update {
+                if let Some(newest) = &result.newest {
+                    if since.as_deref().is_none_or(|s| newest.as_str() > s) {
+                        write_state(&a.state, newest)?;
+                    }
+                }
+            }
+            let mut comments = result.comments;
             if a.md {
                 md::field_to_md(&mut comments, "comment")?;
             }

@@ -281,6 +281,111 @@ pub fn modify(
     c.get(&format!("/tasks/{id}"), &[])
 }
 
+/// New comments found by `replies`, plus the newest `created` timestamp seen
+/// across *all* comments in the project (used to advance the poll state file,
+/// even when no comment is new — e.g. the first-run baseline).
+pub struct Replies {
+    pub comments: Value,
+    pub newest: Option<String>,
+}
+
+/// Poll the whole project for comments newer than `since` (an RFC3339 timestamp,
+/// compared lexicographically — Vikunja returns UTC `...Z` strings). We fetch
+/// every task with `expand=comments` (which inlines up to the first 50 comments
+/// per task) and flatten their comments into a chronological list, annotated with
+/// the owning task's id/title.
+///
+/// `since = None` means "first run": we report nothing and only compute the
+/// baseline so subsequent polls are incremental. Comments authored by `me` are
+/// dropped unless `include_mine` (an agent's own replies aren't followups).
+pub fn replies(
+    c: &VikunjaClient,
+    project_id: i64,
+    since: Option<&str>,
+    me: Option<&str>,
+    include_mine: bool,
+    per_page: u32,
+) -> Result<Replies> {
+    let query: Vec<(&str, String)> = vec![
+        ("filter", format!("project_id = {project_id}")),
+        ("expand", "comments".to_string()),
+        ("per_page", per_page.to_string()),
+    ];
+    let tasks = c.get("/tasks", &query)?;
+    let arr = tasks
+        .as_array()
+        .ok_or_else(|| anyhow!("expected a task array from /tasks, got: {tasks}"))?;
+    // Same ambiguity as `list`: an empty array can mean "no access" rather than
+    // "no tasks" — probe the project so we surface a real error.
+    if arr.is_empty() && !c.project_accessible(project_id)? {
+        bail!(
+            "no access to project {project_id} (it may not exist, or your token lacks permission)"
+        );
+    }
+
+    Ok(collect_replies(&tasks, since, me, include_mine))
+}
+
+/// Pure core of `replies`: flatten the comments of an `expand=comments` task
+/// array into new-reply objects and compute the baseline. Split out from the
+/// network fetch so it can be unit-tested.
+fn collect_replies(tasks: &Value, since: Option<&str>, me: Option<&str>, include_mine: bool) -> Replies {
+    let mut out: Vec<Value> = Vec::new();
+    let mut newest: Option<String> = None;
+    for t in tasks.as_array().into_iter().flatten() {
+        let task_id = t.get("id").cloned().unwrap_or(Value::Null);
+        let task_title = t.get("title").cloned().unwrap_or(Value::Null);
+        let comments = match t.get("comments").and_then(Value::as_array) {
+            Some(cs) => cs,
+            None => continue,
+        };
+        for cm in comments {
+            let created = cm.get("created").and_then(Value::as_str).unwrap_or("");
+            if newest.as_deref().is_none_or(|n| created > n) {
+                newest = Some(created.to_string());
+            }
+            // First run (no `since`): baseline only, emit nothing.
+            let s = match since {
+                Some(s) => s,
+                None => continue,
+            };
+            if created <= s {
+                continue;
+            }
+            let author = cm
+                .get("author")
+                .and_then(|a| a.get("username"))
+                .and_then(Value::as_str);
+            if !include_mine {
+                if let (Some(me), Some(author)) = (me, author) {
+                    if me == author {
+                        continue;
+                    }
+                }
+            }
+            out.push(json!({
+                "task_id": task_id,
+                "task_title": task_title,
+                "comment_id": cm.get("id").cloned().unwrap_or(Value::Null),
+                "author": author,
+                "created": created,
+                "comment": cm.get("comment").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+    // Chronological order so an agent processes followups oldest-first.
+    out.sort_by(|a, b| {
+        a.get("created")
+            .and_then(Value::as_str)
+            .cmp(&b.get("created").and_then(Value::as_str))
+    });
+
+    Replies {
+        comments: Value::Array(out),
+        newest,
+    }
+}
+
 /// Add a comment to a task via `PUT /tasks/{id}/comments`.
 pub fn comment(c: &VikunjaClient, id: i64, text: &str) -> Result<Value> {
     c.put_json(
@@ -353,8 +458,57 @@ pub fn embed_attachments(c: &VikunjaClient, task_id: i64, uploaded: &Value) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_task, topo_sort_blockers};
+    use super::{collect_replies, compact_task, topo_sort_blockers};
     use serde_json::{json, Value};
+
+    fn sample_tasks() -> Value {
+        json!([
+            {
+                "id": 1, "title": "alpha",
+                "comments": [
+                    {"id": 10, "created": "2026-07-01T09:00:00Z", "comment": "old", "author": {"username": "boss"}},
+                    {"id": 11, "created": "2026-07-02T12:00:00Z", "comment": "new reply", "author": {"username": "boss"}},
+                ],
+            },
+            {
+                "id": 2, "title": "beta",
+                "comments": [
+                    {"id": 20, "created": "2026-07-02T15:00:00Z", "comment": "my own note", "author": {"username": "me"}},
+                    {"id": 21, "created": "2026-07-02T08:00:00Z", "comment": "another", "author": {"username": "boss"}},
+                ],
+            },
+            {"id": 3, "title": "gamma"},
+        ])
+    }
+
+    #[test]
+    fn replies_first_run_baselines_and_reports_nothing() {
+        let r = collect_replies(&sample_tasks(), None, Some("me"), false);
+        assert_eq!(r.comments, json!([]));
+        // newest across all comments becomes the baseline
+        assert_eq!(r.newest.as_deref(), Some("2026-07-02T15:00:00Z"));
+    }
+
+    #[test]
+    fn replies_since_filters_and_excludes_mine_and_sorts() {
+        let r = collect_replies(&sample_tasks(), Some("2026-07-01T09:00:00Z"), Some("me"), false);
+        // Newer than since, not mine, sorted oldest-first: id 21 then 11.
+        let ids: Vec<i64> = r.comments.as_array().unwrap().iter()
+            .map(|c| c["comment_id"].as_i64().unwrap()).collect();
+        assert_eq!(ids, vec![21, 11]);
+        // task context is attached
+        assert_eq!(r.comments[0]["task_id"], json!(2));
+        assert_eq!(r.comments[0]["task_title"], json!("beta"));
+    }
+
+    #[test]
+    fn replies_include_mine_keeps_own_comments() {
+        let r = collect_replies(&sample_tasks(), Some("2026-07-01T09:00:00Z"), Some("me"), true);
+        let ids: Vec<i64> = r.comments.as_array().unwrap().iter()
+            .map(|c| c["comment_id"].as_i64().unwrap()).collect();
+        // now includes id 20 (mine), still chronological: 21, 11, 20
+        assert_eq!(ids, vec![21, 11, 20]);
+    }
 
     #[test]
     fn compact_drops_empty_and_keeps_signal() {

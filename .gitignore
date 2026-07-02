@@ -1,5 +1,8 @@
 vikunja.yaml
 
+# `vik replies` poll state (last-seen comment timestamp)
+.vik-last-reply
+
 # Rust
 /target/
 

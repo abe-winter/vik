@@ -62,6 +62,31 @@ getters (`list`, `comments`, and the task returned by `create`/`modify`) it
 converts the HTML fields back to markdown. Lives in `md.rs`. If pandoc is missing
 the command fails with a clear error (acceptable — it's an opt-in flag).
 
+## Replies polling (`replies`)
+
+Agents want to poll a project for new comment followups. Vikunja has no
+"comments since T across a project" endpoint, but the `/tasks` filter endpoint
+accepts `expand=comments`, which inlines up to the first 50 comments per task —
+so one paginated query over the project's tasks yields all their comments. We
+flatten those, keep the ones newer than a stored timestamp, and annotate each
+with its task id/title.
+
+- **State**: a local `.vik-last-reply` file (per project directory) holds the
+  last-seen RFC3339 timestamp. `--since` overrides it (for backfill); `--state`
+  relocates it; `--no-update` peeks without advancing it.
+- **First run** (no state, no `--since`): baseline only — advance the timestamp
+  to the newest existing comment and report nothing, so later polls are
+  incremental.
+- **Own comments** are excluded by default (they aren't followups); `--include-mine`
+  keeps them.
+- Timestamps are compared lexicographically (Vikunja returns UTC `...Z` strings,
+  which sort correctly). We considered the notifications API instead, but it's
+  user-global rather than project-scoped, has an untyped payload, and only fires
+  for subscribed/mentioned tasks.
+- **Limitation**: `expand=comments` caps at the first 50 comments per task, so a
+  single task with >50 comments could miss newer ones — fine for the followup
+  use case, noted here for the record.
+
 ## Module layout
 
 ```

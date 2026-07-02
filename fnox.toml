@@ -1,0 +1,8 @@
+default_provider = "pass"
+
+[providers.pass]
+type = "password-store"
+prefix = "fnox/vik/"
+
+[secrets]
+VIKUNJA_TOKEN= { provider = "pass", value = "VIKUNJA_TOKEN" }

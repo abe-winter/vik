@@ -47,7 +47,9 @@ struct Cli {
 
 /// Tri-state task status. Vikunja has no native "in progress" field, so we map
 /// the middle state onto `percent_done`: a not-done task with any progress > 0 is
-/// "doing". (todo = not done & 0%, doing = not done & >0%, done = done.)
+/// "doing". (todo = not done & 0%, doing = not done & >0%, done = done & 100%.)
+/// Marking done sets percent_done to 100% so a task that passed through "doing"
+/// (50%) doesn't get stranded at done-but-half-finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum TaskState {
     Todo,
@@ -396,7 +398,7 @@ fn main() -> Result<()> {
             let (done, mut percent_done) = match a.done {
                 Some(TaskState::Todo) => (Some(false), Some(0.0)),
                 Some(TaskState::Doing) => (Some(false), Some(DOING_PERCENT)),
-                Some(TaskState::Done) => (Some(true), None),
+                Some(TaskState::Done) => (Some(true), Some(1.0)),
                 None => (None, None),
             };
             if a.percent_done.is_some() {

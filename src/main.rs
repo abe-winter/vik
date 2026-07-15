@@ -126,7 +126,11 @@ struct ShowArgs {
     /// Trim the returned task to a few high-signal fields to save context
     #[arg(long)]
     compact: bool,
-    /// Convert the task's HTML description to markdown in the output (needs pandoc)
+    /// Also fetch the task's comments, nested under a `comments` key
+    #[arg(long)]
+    comments: bool,
+    /// Convert the task's HTML description (and comments, with --comments) to
+    /// markdown in the output (needs pandoc)
     #[arg(long)]
     md: bool,
 }
@@ -385,7 +389,8 @@ fn main() -> Result<()> {
         }
 
         Command::Show(a) => {
-            let task = commands::show(&cli.ctx()?.client, a.id)?;
+            let ctx = cli.ctx()?;
+            let task = commands::show(&ctx.client, a.id)?;
             let mut task = if a.compact {
                 commands::compact_task(&task)
             } else {
@@ -393,6 +398,15 @@ fn main() -> Result<()> {
             };
             if a.md {
                 md::field_to_md(&mut task, "description")?;
+            }
+            if a.comments {
+                let mut comments = commands::comments(&ctx.client, a.id)?;
+                if a.md {
+                    md::field_to_md(&mut comments, "comment")?;
+                }
+                if let Some(obj) = task.as_object_mut() {
+                    obj.insert("comments".to_string(), comments);
+                }
             }
             task
         }

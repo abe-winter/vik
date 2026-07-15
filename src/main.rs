@@ -67,6 +67,8 @@ enum Command {
     Projects,
     /// List tasks in the current project
     List(ListArgs),
+    /// Show a single task by id
+    Show(ShowArgs),
     /// Create a task in the current project
     Create(CreateArgs),
     /// Update a task's fields and/or assignee
@@ -115,6 +117,18 @@ struct ListArgs {
     /// Maximum number of tasks to return
     #[arg(long, default_value_t = 50)]
     per_page: u32,
+}
+
+#[derive(Args)]
+struct ShowArgs {
+    /// Task id
+    id: i64,
+    /// Trim the returned task to a few high-signal fields to save context
+    #[arg(long)]
+    compact: bool,
+    /// Convert the task's HTML description to markdown in the output (needs pandoc)
+    #[arg(long)]
+    md: bool,
 }
 
 #[derive(Args)]
@@ -368,6 +382,19 @@ fn main() -> Result<()> {
                 md::field_to_md(&mut tasks, "description")?;
             }
             tasks
+        }
+
+        Command::Show(a) => {
+            let task = commands::show(&cli.ctx()?.client, a.id)?;
+            let mut task = if a.compact {
+                commands::compact_task(&task)
+            } else {
+                task
+            };
+            if a.md {
+                md::field_to_md(&mut task, "description")?;
+            }
+            task
         }
 
         Command::Create(a) => {

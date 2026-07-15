@@ -87,6 +87,11 @@ pub fn list(
     Ok(tasks)
 }
 
+/// Fetch a single task by id via `GET /tasks/{id}`.
+pub fn show(c: &VikunjaClient, id: i64) -> Result<Value> {
+    c.get(&format!("/tasks/{id}"), &[])
+}
+
 /// Reorder a task array (the `list` response) into blocker order via a
 /// client-side topological sort: a task that blocks another comes first, with
 /// task id as the tie-breaker. Edges come from each task's `related_tasks`

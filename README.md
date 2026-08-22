@@ -1,3 +1,6 @@
+> [!NOTE]
+> Don't use this. There is a first-party CLI in the vikunja repo [veans](https://github.com/go-vikunja/vikunja/tree/main/veans) and several in-progress MCP PRs.
+
 # vik
 
 vikunja cli client for agents

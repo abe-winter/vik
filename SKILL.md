@@ -1,6 +1,7 @@
-# vik task tracking
-
-this repo uses vikunja for task tracking via the `vik` CLI.
+---
+name: vik
+description: manage vikunja task tracking via CLI
+---
 
 Useful commands:
 

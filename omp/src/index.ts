@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { VikunjaClient, limits, type TaskState } from "./vikunja";
+import { RELATION_KINDS, VikunjaClient, limits, type RelationKind, type TaskState } from "./vikunja";
 
 type ReadInput = {
   action: "list" | "show" | "comments" | "attachments";
@@ -16,7 +16,7 @@ type ReadInput = {
 };
 
 type WriteInput = {
-  action: "create" | "modify" | "comment" | "assign" | "attach";
+  action: "create" | "modify" | "comment" | "assign" | "attach" | "relate" | "unrelate";
   projectId?: number;
   taskId?: number;
   title?: string;
@@ -31,6 +31,8 @@ type WriteInput = {
   assigneeUsername?: string;
   files?: string[];
   embed?: boolean;
+  otherTaskId?: number;
+  relationKind?: RelationKind;
 };
 
 function result(value: unknown) {
@@ -40,6 +42,15 @@ function result(value: unknown) {
 function requiredTaskId(input: { taskId?: number }): number {
   if (input.taskId === undefined) throw new Error("taskId is required for this action");
   return input.taskId;
+}
+
+function requiredRelation(input: { otherTaskId?: number; relationKind?: RelationKind }): {
+  otherTaskId: number;
+  relationKind: RelationKind;
+} {
+  if (input.otherTaskId === undefined) throw new Error("otherTaskId is required for relation actions");
+  if (input.relationKind === undefined) throw new Error("relationKind is required for relation actions");
+  return { otherTaskId: input.otherTaskId, relationKind: input.relationKind };
 }
 
 export default function vikExtension(pi: ExtensionAPI) {
@@ -85,11 +96,11 @@ export default function vikExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "vik_write",
     label: "Vikunja Write",
-    description: "Create, modify, or assign Vikunja tasks; add comments or upload attachments. Uses VIKUNJA_TOKEN and discovered Vikunja config.",
+    description: "Create, modify, assign, or relate Vikunja tasks; add comments or upload attachments. Uses VIKUNJA_TOKEN and discovered Vikunja config.",
     approval: "write",
     strict: true,
     parameters: z.object({
-      action: z.enum(["create", "modify", "comment", "assign", "attach"]),
+      action: z.enum(["create", "modify", "comment", "assign", "attach", "relate", "unrelate"]),
       projectId,
       taskId,
       title: z.string().min(1).max(512).optional(),
@@ -104,6 +115,8 @@ export default function vikExtension(pi: ExtensionAPI) {
       assigneeUsername: z.string().min(1).max(255).optional().describe("Exact username to resolve and assign; requires /users permission."),
       files: z.array(z.string().min(1).max(4_096)).min(1).max(20).optional().describe("Attachment paths relative to the OMP working directory."),
       embed: z.boolean().optional().describe("Append uploaded attachments as Markdown images in the task description."),
+      otherTaskId: z.number().int().positive().optional().describe("Global id of the other task in a relation."),
+      relationKind: z.enum(RELATION_KINDS).optional().describe("Describes taskId relative to otherTaskId; for example, blocking means taskId blocks otherTaskId."),
     }),
     async execute(_id, input: WriteInput, signal, _onUpdate, ctx) {
       const { client, config } = await VikunjaClient.create({ cwd: ctx.cwd });
@@ -123,6 +136,10 @@ export default function vikExtension(pi: ExtensionAPI) {
         case "attach":
           if (!input.files?.length) throw new Error("files is required to attach files");
           return result(await client.attach({ taskId: requiredTaskId(input), files: input.files, embed: input.embed }, ctx.cwd, signal));
+        case "relate":
+          return result(await client.relate({ taskId: requiredTaskId(input), ...requiredRelation(input) }, signal));
+        case "unrelate":
+          return result(await client.unrelate({ taskId: requiredTaskId(input), ...requiredRelation(input) }, signal));
       }
     },
   });

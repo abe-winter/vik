@@ -181,6 +181,72 @@ test("attachment upload embeds the returned image without resetting task fields"
   }
 });
 
+test("relate sends the base-task direction and returns refreshed relations", async () => {
+  let relationExists = false;
+  const relatedTask = { id: 401, index: 27, identifier: "OPS-27", project_id: 13, title: "dependent", done: false };
+  const fake = fakeServer((request) => {
+    if (request.method === "PUT" && request.path === "/api/v1/tasks/400/relations") {
+      relationExists = true;
+      return Response.json({ task_id: 400, other_task_id: 401, relation_kind: "blocking" }, { status: 201 });
+    }
+    if (request.method === "GET" && request.path === "/api/v1/tasks/400") {
+      return Response.json({ id: 400, index: 99, title: "base", done: false, related_tasks: relationExists ? { blocking: [relatedTask] } : {} });
+    }
+    return new Response("unexpected", { status: 500 });
+  });
+  const { client } = await clientFor(fake.url);
+  await expect(client.relate({ taskId: 400, otherTaskId: 401, relationKind: "blocking" })).resolves.toMatchObject({
+    id: 400,
+    index: 99,
+    related_tasks: { blocking: [relatedTask] },
+  });
+  expect(fake.requests[0]).toMatchObject({
+    method: "PUT",
+    path: "/api/v1/tasks/400/relations",
+    body: { other_task_id: 401, relation_kind: "blocking" },
+  });
+});
+
+test("unrelate preflights the exact directional tuple before deleting", async () => {
+  let relationExists = true;
+  const relatedTask = { id: 401, index: 27, identifier: "OPS-27", project_id: 13, title: "dependent", done: false };
+  const fake = fakeServer((request) => {
+    if (request.method === "GET" && request.path === "/api/v1/tasks/400") {
+      return Response.json({ id: 400, index: 99, title: "base", done: false, related_tasks: relationExists ? { blocking: [relatedTask] } : {} });
+    }
+    if (request.method === "DELETE" && request.path === "/api/v1/tasks/400/relations/blocking/401") {
+      relationExists = false;
+      return Response.json({ message: "relation removed" });
+    }
+    return new Response("unexpected", { status: 500 });
+  });
+  const { client } = await clientFor(fake.url);
+  await expect(client.unrelate({ taskId: 400, otherTaskId: 401, relationKind: "blocking" })).resolves.toMatchObject({
+    id: 400,
+    index: 99,
+  });
+  expect(fake.requests).toHaveLength(3);
+  expect(fake.requests[1]).toMatchObject({
+    method: "DELETE",
+    path: "/api/v1/tasks/400/relations/blocking/401",
+    body: { task_id: 400, other_task_id: 401, relation_kind: "blocking" },
+  });
+});
+
+test("unrelate refuses a reversed relation kind without issuing DELETE", async () => {
+  const fake = fakeServer(() => Response.json({
+    id: 400,
+    title: "base",
+    done: false,
+    related_tasks: { blocked: [{ id: 401, title: "blocker" }] },
+  }));
+  const { client } = await clientFor(fake.url);
+  await expect(client.unrelate({ taskId: 400, otherTaskId: 401, relationKind: "blocking" }))
+    .rejects.toThrow("task 400 has no blocking relation to task 401");
+  expect(fake.requests).toHaveLength(1);
+  expect(fake.requests.some(({ method }) => method === "DELETE")).toBe(false);
+});
+
 test("HTTP errors are actionable and do not disclose the bearer token", async () => {
   const fake = fakeServer(() => new Response("denied", { status: 403, statusText: "Forbidden" }));
   const { client } = await clientFor(fake.url);

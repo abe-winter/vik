@@ -31,14 +31,26 @@ test("compactTask retains priority, attachments, and related task identity", () 
     done: true,
     priority: 4,
     attachments: [{ id: 9, file: { name: "diagram.png", size: 70 } }],
-    related_tasks: { blocking: [{ id: 8, title: "ship", description: "ignored" }] },
+    related_tasks: {
+      blocking: [{
+        id: 8,
+        index: 27,
+        identifier: "OPS-27",
+        project_id: 13,
+        title: "ship",
+        done: false,
+        description: "ignored",
+      }],
+    },
   })).toEqual({
     id: 7,
     title: "build",
     done: true,
     priority: 4,
     attachments: [{ id: 9, name: "diagram.png" }],
-    related_tasks: { blocking: [{ id: 8, title: "ship" }] },
+    related_tasks: {
+      blocking: [{ id: 8, index: 27, identifier: "OPS-27", project_id: 13, title: "ship", done: false }],
+    },
   });
 });
 

@@ -7,6 +7,22 @@ import { parse } from "yaml";
 
 export type TaskState = "todo" | "doing" | "done";
 
+export const RELATION_KINDS = [
+  "subtask",
+  "parenttask",
+  "related",
+  "duplicateof",
+  "duplicates",
+  "blocking",
+  "blocked",
+  "precedes",
+  "follows",
+  "copiedfrom",
+  "copiedto",
+] as const;
+
+export type RelationKind = (typeof RELATION_KINDS)[number];
+
 export interface VikunjaConfig {
   server?: string;
   project?: string | number;
@@ -122,10 +138,16 @@ export function compactTask(value: unknown): JsonObject {
     const compactRelated: JsonObject = {};
     for (const [kind, tasks] of Object.entries(related)) {
       if (!Array.isArray(tasks) || tasks.length === 0) continue;
-      compactRelated[kind] = tasks.map(asObject).filter((relatedTask): relatedTask is JsonObject => Boolean(relatedTask)).map((relatedTask) => ({
-        id: relatedTask.id,
-        title: relatedTask.title,
-      }));
+      compactRelated[kind] = tasks
+        .map(asObject)
+        .filter((relatedTask): relatedTask is JsonObject => Boolean(relatedTask))
+        .map((relatedTask) => {
+          const item: JsonObject = {};
+          for (const field of ["id", "index", "identifier", "project_id", "title", "done"] as const) {
+            if (field in relatedTask) item[field] = relatedTask[field];
+          }
+          return item;
+        });
     }
     if (Object.keys(compactRelated).length) compact.related_tasks = compactRelated;
   }
@@ -316,6 +338,47 @@ export class VikunjaClient {
     } catch (error) {
       if (!(error instanceof Error) || !error.message.includes("4021")) throw error;
     }
+    return this.show(input.taskId, false, signal);
+  }
+
+  async relate(
+    input: { taskId: number; otherTaskId: number; relationKind: RelationKind },
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    if (input.taskId === input.otherTaskId) throw new Error("a task cannot be related to itself");
+    await this.request(`/tasks/${input.taskId}/relations`, {
+      method: "PUT",
+      body: JSON.stringify({ other_task_id: input.otherTaskId, relation_kind: input.relationKind }),
+      signal,
+    });
+    return this.show(input.taskId, false, signal);
+  }
+
+  async unrelate(
+    input: { taskId: number; otherTaskId: number; relationKind: RelationKind },
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const task = asObject(await this.request(`/tasks/${input.taskId}`, { signal }));
+    if (!task) throw new Error(`task ${input.taskId} response is not a JSON object`);
+    const relations = asObject(task.related_tasks);
+    const candidates = relations?.[input.relationKind];
+    const exists = Array.isArray(candidates) && candidates.some((candidate) => {
+      const relatedTask = asObject(candidate);
+      return numberField(relatedTask?.id) === input.otherTaskId;
+    });
+    if (!exists) {
+      throw new Error(`task ${input.taskId} has no ${input.relationKind} relation to task ${input.otherTaskId}`);
+    }
+
+    await this.request(`/tasks/${input.taskId}/relations/${input.relationKind}/${input.otherTaskId}`, {
+      method: "DELETE",
+      body: JSON.stringify({
+        task_id: input.taskId,
+        other_task_id: input.otherTaskId,
+        relation_kind: input.relationKind,
+      }),
+      signal,
+    });
     return this.show(input.taskId, false, signal);
   }
 

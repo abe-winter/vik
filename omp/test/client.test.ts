@@ -1,0 +1,189 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, expect, test } from "bun:test";
+import { VikunjaClient } from "../src/vikunja";
+
+type JsonBody = Record<string, unknown>;
+type RecordedRequest = { method: string; path: string; query: URLSearchParams; authorization: string | null; body: JsonBody | undefined };
+type FakeServer = { stop(closeActiveConnections?: boolean): void };
+const servers: FakeServer[] = [];
+
+function fakeServer(handler: (request: RecordedRequest) => Response): { url: string; requests: RecordedRequest[] } {
+  const requests: RecordedRequest[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      const text = await request.text();
+      const recorded = {
+        method: request.method,
+        path: url.pathname,
+        query: url.searchParams,
+        authorization: request.headers.get("authorization"),
+        body: text ? JSON.parse(text) as JsonBody : undefined,
+      };
+      requests.push(recorded);
+      return handler(recorded);
+    },
+  });
+  servers.push(server);
+  return { url: `http://127.0.0.1:${server.port}`, requests };
+}
+
+afterEach(() => { while (servers.length) servers.pop()?.stop(true); });
+
+async function clientFor(server: string) {
+  return VikunjaClient.create({
+    cwd: "/workspace",
+    env: { VIKUNJA_TOKEN: "secret", HOME: "/home/test" },
+    readFile: async (path) => path === "/workspace/.vikunja.yaml" ? `server: ${server}\nproject: 17\nusername: me\nuser_id: 73` : Promise.reject(new Error("ENOENT")),
+  });
+}
+
+test("list sends direct authenticated API request and Rust-compatible filters", async () => {
+  const fake = fakeServer((request) => {
+    if (request.path === "/api/v1/tasks") return Response.json([]);
+    if (request.path === "/api/v1/projects/17") return Response.json({ id: 17 });
+    return new Response("unexpected", { status: 500 });
+  });
+  const { client, config } = await clientFor(fake.url);
+  await expect(client.list(config, { state: "doing", mine: true, filter: "priority >= 3", search: "plan", sortBy: "priority", orderBy: "desc" })).resolves.toEqual([]);
+  expect(fake.requests[0]).toMatchObject({ method: "GET", path: "/api/v1/tasks", authorization: "Bearer secret" });
+  expect(fake.requests[0].query.get("filter")).toBe("project_id = 17 && done = false && percent_done > 0 && assignees in me && (priority >= 3)");
+  expect(fake.requests[0].query.get("per_page")).toBe("50");
+  expect(fake.requests[0].query.get("s")).toBe("plan");
+  expect(fake.requests[0].query.get("sort_by")).toBe("priority");
+  expect(fake.requests[0].query.get("order_by")).toBe("desc");
+  expect(fake.requests[1]).toMatchObject({ path: "/api/v1/projects/17", authorization: "Bearer secret" });
+});
+
+test("create converts Markdown and uses the project task endpoint", async () => {
+  const fake = fakeServer((request) => Response.json({ id: 3, done: false, ...(request.body ?? {}) }));
+  const { client, config } = await clientFor(fake.url);
+  await expect(client.create(config, { title: "new", description: "**bold**", priority: 2, percentDone: 0.25 })).resolves.toEqual({ id: 3, title: "new", done: false, priority: 2, description: "**bold**" });
+  expect(fake.requests[0]).toMatchObject({ method: "PUT", path: "/api/v1/projects/17/tasks", body: { title: "new", description: "<p><strong>bold</strong></p>\n", priority: 2, percent_done: 0.25 } });
+});
+
+test("modify reads, merges, and preserves omitted Vikunja value fields", async () => {
+  const current = { id: 9, title: "old", description: "<p>before</p>", done: true, priority: 5, percent_done: 1, bucket_id: 44 };
+  const fake = fakeServer((request) => request.method === "GET" ? Response.json(current) : Response.json(request.body));
+  const { client } = await clientFor(fake.url);
+  await expect(client.modify({ taskId: 9, description: "after", state: "doing", percentDone: 0.75 })).resolves.toEqual({ id: 9, title: "old", done: false, priority: 5, description: "after" });
+  expect(fake.requests).toHaveLength(2);
+  expect(fake.requests[1]).toMatchObject({ method: "POST", path: "/api/v1/tasks/9", body: { ...current, description: "<p>after</p>\n", done: false, percent_done: 0.75 } });
+});
+
+test("claiming prefers configured user_id and does not require user search permission", async () => {
+  const fake = fakeServer((request) => {
+    if (request.method === "PUT" && request.path === "/api/v1/tasks/9/assignees") return Response.json({ created: true });
+    if (request.method === "GET" && request.path === "/api/v1/tasks/9") {
+      return Response.json({ id: 9, index: 99, title: "claimed", done: false, assignees: [{ username: "me" }] });
+    }
+    return new Response("unexpected", { status: 500 });
+  });
+  const { client, config } = await clientFor(fake.url);
+  await expect(client.assign(config, { taskId: 9, mine: true })).resolves.toEqual({
+    id: 9,
+    index: 99,
+    title: "claimed",
+    done: false,
+    assignees: ["me"],
+  });
+  expect(fake.requests[0]).toMatchObject({
+    method: "PUT",
+    path: "/api/v1/tasks/9/assignees",
+    body: { user_id: 73 },
+  });
+  expect(fake.requests.some(({ path }) => path === "/api/v1/users")).toBe(false);
+});
+
+test("attachment listing returns compact file metadata", async () => {
+  const fake = fakeServer(() => Response.json([{
+    id: 12,
+    task_id: 9,
+    created: "2026-09-04T12:00:00Z",
+    created_by: { username: "me", email: "ignored@example.test" },
+    file: { id: 33, name: "render.png", mime: "image/png", size: 2048, extra: true },
+  }]));
+  const { client } = await clientFor(fake.url);
+  await expect(client.attachments(9)).resolves.toEqual([{
+    id: 12,
+    task_id: 9,
+    created: "2026-09-04T12:00:00Z",
+    created_by: "me",
+    file: { id: 33, name: "render.png", mime: "image/png", size: 2048 },
+  }]);
+  expect(fake.requests[0]).toMatchObject({ method: "GET", path: "/api/v1/tasks/9/attachments" });
+});
+
+test("explicit username assignment resolves the user and tolerates already-assigned responses", async () => {
+  const fake = fakeServer((request) => {
+    if (request.method === "GET" && request.path === "/api/v1/users") {
+      return Response.json([{ id: 81, username: "alice" }]);
+    }
+    if (request.method === "PUT" && request.path === "/api/v1/tasks/9/assignees") {
+      return Response.json({ code: 4021, message: "already assigned" }, { status: 400 });
+    }
+    if (request.method === "GET" && request.path === "/api/v1/tasks/9") {
+      return Response.json({ id: 9, title: "claimed", done: false, assignees: [{ username: "alice" }] });
+    }
+    return new Response("unexpected", { status: 500 });
+  });
+  const { client, config } = await clientFor(fake.url);
+  await expect(client.assign(config, { taskId: 9, assigneeUsername: "alice" })).resolves.toMatchObject({ assignees: ["alice"] });
+  expect(fake.requests[0].query.get("s")).toBe("alice");
+  expect(fake.requests[1].body).toEqual({ user_id: 81 });
+});
+
+test("attachment upload embeds the returned image without resetting task fields", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "vik-attachment-"));
+  const attachmentPath = join(directory, "render.png");
+  await writeFile(attachmentPath, "png fixture");
+  let uploadContentType = "";
+  let uploadedName = "";
+  let postedTask: JsonBody | undefined;
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      if (request.method === "PUT" && url.pathname === "/api/v1/tasks/9/attachments") {
+        uploadContentType = request.headers.get("content-type") ?? "";
+        const form = await request.formData();
+        const file = form.get("files");
+        uploadedName = file instanceof File ? file.name : "";
+        return Response.json({ success: [{ id: 12, task_id: 9, file: { id: 33, name: uploadedName, mime: "image/png", size: 11 } }] });
+      }
+      if (request.method === "GET" && url.pathname === "/api/v1/tasks/9") {
+        return Response.json({ id: 9, index: 99, title: "render", done: true, priority: 5, description: "<p>Existing</p>" });
+      }
+      if (request.method === "POST" && url.pathname === "/api/v1/tasks/9") {
+        postedTask = await request.json() as JsonBody;
+        return Response.json(postedTask);
+      }
+      return new Response("unexpected", { status: 500 });
+    },
+  });
+  servers.push(server);
+  try {
+    const { client } = await clientFor(`http://127.0.0.1:${server.port}`);
+    const result = await client.attach({ taskId: 9, files: [attachmentPath], embed: true }, "/workspace");
+    expect(uploadContentType).toStartWith("multipart/form-data; boundary=");
+    expect(uploadedName).toBe("render.png");
+    expect(postedTask).toMatchObject({ id: 9, index: 99, done: true, priority: 5 });
+    expect(postedTask?.description).toContain("/api/v1/tasks/9/attachments/12");
+    expect(result).toMatchObject({
+      attachments: [{ id: 12, task_id: 9, file: { id: 33, name: "render.png" } }],
+      task: { id: 9, index: 99, done: true, priority: 5 },
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("HTTP errors are actionable and do not disclose the bearer token", async () => {
+  const fake = fakeServer(() => new Response("denied", { status: 403, statusText: "Forbidden" }));
+  const { client } = await clientFor(fake.url);
+  await expect(client.comments(1)).rejects.toThrow("Vikunja API request failed: 403 Forbidden");
+  await expect(client.comments(1)).rejects.not.toThrow("secret");
+});

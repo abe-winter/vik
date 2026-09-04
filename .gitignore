@@ -6,6 +6,9 @@ vikunja.yaml
 # Rust
 /target/
 
+# OMP TypeScript extension
+/omp/node_modules/
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db

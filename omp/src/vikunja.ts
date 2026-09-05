@@ -23,6 +23,36 @@ export const RELATION_KINDS = [
 
 export type RelationKind = (typeof RELATION_KINDS)[number];
 
+export type RelationKindsInput = RelationKind[] | "all";
+
+const INVERSE_RELATION_KIND: Record<RelationKind, RelationKind> = {
+  subtask: "parenttask",
+  parenttask: "subtask",
+  related: "related",
+  duplicateof: "duplicates",
+  duplicates: "duplicateof",
+  blocking: "blocked",
+  blocked: "blocking",
+  precedes: "follows",
+  follows: "precedes",
+  copiedfrom: "copiedto",
+  copiedto: "copiedfrom",
+};
+
+function normalizeRelationKinds(input: RelationKindsInput | undefined): RelationKind[] {
+  if (input === "all") return [...RELATION_KINDS];
+  const requested = input ?? ["blocking"];
+  if (requested.length === 0 || requested.some((kind) => !RELATION_KINDS.includes(kind))) {
+    throw new Error("relationKinds must be 'all' or contain supported Vikunja relation kinds");
+  }
+  const normalized = new Set<RelationKind>();
+  for (const kind of requested) {
+    normalized.add(kind);
+    normalized.add(INVERSE_RELATION_KIND[kind]);
+  }
+  return RELATION_KINDS.filter((kind) => normalized.has(kind));
+}
+
 export interface VikunjaConfig {
   server?: string;
   project?: string | number;
@@ -41,6 +71,10 @@ type JsonObject = Record<string, unknown>;
 
 const DEFAULT_PER_PAGE = 50;
 const MAX_PER_PAGE = 100;
+const DEFAULT_GRAPH_DEPTH = 10;
+const DEFAULT_GRAPH_NODES = 100;
+const MAX_GRAPH_DEPTH = 20;
+const MAX_GRAPH_NODES = 100;
 
 function asObject(value: unknown): JsonObject | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -54,6 +88,31 @@ function numberField(value: unknown): number | undefined {
 
 function stringField(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+type GraphEdge = { from: number; to: number; kind: RelationKind };
+
+function normalizeRelationEdge(from: number, to: number, kind: RelationKind): GraphEdge {
+  switch (kind) {
+    case "parenttask": return { from: to, to: from, kind: "subtask" };
+    case "duplicates": return { from: to, to: from, kind: "duplicateof" };
+    case "blocked": return { from: to, to: from, kind: "blocking" };
+    case "follows": return { from: to, to: from, kind: "precedes" };
+    case "copiedto": return { from: to, to: from, kind: "copiedfrom" };
+    case "related": return from <= to
+      ? { from, to, kind }
+      : { from: to, to: from, kind };
+    default: return { from, to, kind };
+  }
+}
+
+function compactGraphNode(value: unknown): JsonObject {
+  const task = asObject(value) ?? {};
+  const node: JsonObject = {};
+  for (const field of ["id", "index", "identifier", "project_id", "title", "done", "priority"] as const) {
+    if (field in task) node[field] = task[field];
+  }
+  return node;
 }
 
 export function normalizeServer(server: string): string {
@@ -244,6 +303,18 @@ export class VikunjaClient {
     throw new Error("no numeric project: pass projectId or set numeric project: in the config file");
   }
 
+  private async tasksByIds(taskIds: number[], signal?: AbortSignal): Promise<JsonObject[]> {
+    const tasks = await this.request("/tasks", {
+      signal,
+      query: {
+        filter: `id in ${taskIds.join(", ")}`,
+        per_page: String(taskIds.length),
+      },
+    });
+    if (!Array.isArray(tasks)) throw new Error("Vikunja API returned a non-array task batch");
+    return tasks.map(asObject).filter((task): task is JsonObject => Boolean(task));
+  }
+
   private async resolveUser(username: string, signal?: AbortSignal): Promise<number> {
     const users = await this.request("/users", { signal, query: { s: username } });
     if (!Array.isArray(users)) throw new Error("Vikunja API returned a non-array user search result");
@@ -284,6 +355,95 @@ export class VikunjaClient {
     if (!Array.isArray(tasks)) throw new Error("Vikunja API returned a non-array task list");
     if (tasks.length === 0) await this.assertProjectAccessible(projectId, signal);
     return compactTasks(tasks);
+  }
+
+  async graph(
+    input: { taskId: number; relationKinds?: RelationKindsInput; maxDepth?: number; maxNodes?: number },
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const relationKinds = normalizeRelationKinds(input.relationKinds);
+    const maxDepth = input.maxDepth ?? DEFAULT_GRAPH_DEPTH;
+    const maxNodes = input.maxNodes ?? DEFAULT_GRAPH_NODES;
+    if (!Number.isInteger(maxDepth) || maxDepth < 0 || maxDepth > MAX_GRAPH_DEPTH) {
+      throw new Error(`maxDepth must be an integer between 0 and ${MAX_GRAPH_DEPTH}`);
+    }
+    if (!Number.isInteger(maxNodes) || maxNodes < 1 || maxNodes > MAX_GRAPH_NODES) {
+      throw new Error(`maxNodes must be an integer between 1 and ${MAX_GRAPH_NODES}`);
+    }
+
+    const requestedKinds = new Set<RelationKind>(relationKinds);
+    const nodes = new Map<number, JsonObject>();
+    const edges = new Map<string, GraphEdge>();
+    const visited = new Set<number>();
+    const unresolved = new Set<number>();
+    const truncationReasons = new Set<"maxDepth" | "maxNodes">();
+    let frontier = [input.taskId];
+    let maxDepthReached = 0;
+
+    for (let depth = 0; frontier.length > 0; depth += 1) {
+      const current = [...new Set(frontier)].filter((taskId) => !visited.has(taskId));
+      if (current.length === 0) break;
+      current.forEach((taskId) => visited.add(taskId));
+      const tasks = await this.tasksByIds(current, signal);
+      const returned = new Set<number>();
+      const next = new Set<number>();
+
+      for (const task of tasks) {
+        const taskId = numberField(task.id);
+        if (taskId === undefined) continue;
+        returned.add(taskId);
+        nodes.set(taskId, compactGraphNode(task));
+        maxDepthReached = Math.max(maxDepthReached, depth);
+
+        const related = asObject(task.related_tasks);
+        if (!related) continue;
+        for (const [kind, candidates] of Object.entries(related)) {
+          if (!requestedKinds.has(kind as RelationKind) || !Array.isArray(candidates)) continue;
+          for (const candidate of candidates) {
+            const relatedTask = asObject(candidate);
+            const otherTaskId = numberField(relatedTask?.id);
+            if (otherTaskId === undefined) continue;
+
+            if (depth >= maxDepth && !nodes.has(otherTaskId)) {
+              truncationReasons.add("maxDepth");
+              continue;
+            }
+            if (!nodes.has(otherTaskId)) {
+              if (nodes.size >= maxNodes) {
+                truncationReasons.add("maxNodes");
+                continue;
+              }
+              nodes.set(otherTaskId, compactGraphNode(relatedTask));
+            }
+
+            const edge = normalizeRelationEdge(taskId, otherTaskId, kind as RelationKind);
+            edges.set(`${edge.kind}:${edge.from}:${edge.to}`, edge);
+            if (depth < maxDepth && !visited.has(otherTaskId)) next.add(otherTaskId);
+          }
+        }
+      }
+
+      for (const taskId of current) {
+        if (!returned.has(taskId)) unresolved.add(taskId);
+      }
+      if (depth >= maxDepth) break;
+      frontier = [...next];
+    }
+
+    if (!nodes.has(input.taskId)) throw new Error(`task ${input.taskId} was not returned by Vikunja`);
+    const reasons = [...truncationReasons].sort();
+    return {
+      rootTaskId: input.taskId,
+      relationKinds,
+      maxDepth,
+      maxNodes,
+      maxDepthReached,
+      truncated: reasons.length > 0,
+      ...(reasons.length ? { truncationReason: reasons.join(",") } : {}),
+      nodes: [...nodes.entries()].sort(([left], [right]) => left - right).map(([, node]) => node),
+      edges: [...edges.values()].sort((left, right) => left.from - right.from || left.to - right.to || left.kind.localeCompare(right.kind)),
+      unresolvedTaskIds: [...unresolved].sort((left, right) => left - right),
+    };
   }
 
   async show(taskId: number, includeComments: boolean, signal?: AbortSignal): Promise<unknown> {
@@ -461,4 +621,4 @@ export class VikunjaClient {
   }
 }
 
-export const limits = { DEFAULT_PER_PAGE, MAX_PER_PAGE };
+export const limits = { DEFAULT_PER_PAGE, MAX_PER_PAGE, MAX_GRAPH_DEPTH, MAX_GRAPH_NODES };

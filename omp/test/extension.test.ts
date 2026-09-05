@@ -19,6 +19,8 @@ test("extension registers exactly the approved Vikunja tool surface", () => {
   const z = {
     object: (shape: unknown) => ({ shape }),
     array: (_item: unknown) => schema(),
+    literal: (_value: unknown) => schema(),
+    union: (_schemas: unknown) => schema(),
     number: schema,
     string: schema,
     boolean: schema,

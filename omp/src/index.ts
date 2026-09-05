@@ -1,8 +1,8 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { RELATION_KINDS, VikunjaClient, limits, type RelationKind, type TaskState } from "./vikunja";
+import { RELATION_KINDS, VikunjaClient, limits, type RelationKind, type RelationKindsInput, type TaskState } from "./vikunja";
 
 type ReadInput = {
-  action: "list" | "show" | "comments" | "attachments";
+  action: "list" | "show" | "comments" | "attachments" | "graph";
   projectId?: number;
   taskId?: number;
   state?: TaskState;
@@ -13,6 +13,9 @@ type ReadInput = {
   perPage?: number;
   mine?: boolean;
   includeComments?: boolean;
+  relationKinds?: RelationKindsInput;
+  maxDepth?: number;
+  maxNodes?: number;
 };
 
 type WriteInput = {
@@ -62,11 +65,11 @@ export default function vikExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "vik_read",
     label: "Vikunja Read",
-    description: "List or show Vikunja tasks, comments, and attachments. Uses VIKUNJA_TOKEN and discovered Vikunja config.",
+    description: "List or show Vikunja tasks, comments, attachments, and bounded dependency graphs. Uses VIKUNJA_TOKEN and discovered Vikunja config.",
     approval: "read",
     strict: true,
     parameters: z.object({
-      action: z.enum(["list", "show", "comments", "attachments"]),
+      action: z.enum(["list", "show", "comments", "attachments", "graph"]),
       projectId,
       taskId,
       state,
@@ -77,6 +80,12 @@ export default function vikExtension(pi: ExtensionAPI) {
       perPage: z.number().int().min(1).max(limits.MAX_PER_PAGE).optional(),
       mine: z.boolean().optional().describe("Limit list results to the configured username."),
       includeComments: z.boolean().optional().describe("With show, also return the task's comments."),
+      relationKinds: z.union([
+        z.literal("all"),
+        z.array(z.enum(RELATION_KINDS)).min(1).max(RELATION_KINDS.length),
+      ]).optional().describe("Relation families to traverse; inverse kinds are included automatically. Pass 'all' for every kind; defaults to blocking."),
+      maxDepth: z.number().int().min(0).max(limits.MAX_GRAPH_DEPTH).optional().describe("Maximum edge depth from the root; defaults to 10."),
+      maxNodes: z.number().int().min(1).max(limits.MAX_GRAPH_NODES).optional().describe("Maximum nodes returned; defaults to 100."),
     }),
     async execute(_id, input: ReadInput, signal, _onUpdate, ctx) {
       const { client, config } = await VikunjaClient.create({ cwd: ctx.cwd });
@@ -89,6 +98,13 @@ export default function vikExtension(pi: ExtensionAPI) {
           return result(await client.comments(requiredTaskId(input), signal));
         case "attachments":
           return result(await client.attachments(requiredTaskId(input), signal));
+        case "graph":
+          return result(await client.graph({
+            taskId: requiredTaskId(input),
+            relationKinds: input.relationKinds,
+            maxDepth: input.maxDepth,
+            maxNodes: input.maxNodes,
+          }, signal));
       }
     },
   });

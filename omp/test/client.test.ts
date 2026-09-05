@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
-import { VikunjaClient } from "../src/vikunja";
+import { RELATION_KINDS, VikunjaClient } from "../src/vikunja";
 
 type JsonBody = Record<string, unknown>;
 type RecordedRequest = { method: string; path: string; query: URLSearchParams; authorization: string | null; body: JsonBody | undefined };
@@ -245,6 +245,67 @@ test("unrelate refuses a reversed relation kind without issuing DELETE", async (
     .rejects.toThrow("task 400 has no blocking relation to task 401");
   expect(fake.requests).toHaveLength(1);
   expect(fake.requests.some(({ method }) => method === "DELETE")).toBe(false);
+});
+
+test("dependency graph fetches one batch per generation and prunes cycles", async () => {
+  const tasks = new Map<number, JsonBody>([
+    [400, { id: 400, index: 99, identifier: "OPS-99", project_id: 13, title: "root", done: false, related_tasks: { blocking: [{ id: 401, index: 100, identifier: "OPS-100", project_id: 13, title: "middle", done: false }] } }],
+    [401, { id: 401, index: 100, identifier: "OPS-100", project_id: 13, title: "middle", done: false, related_tasks: { blocked: [{ id: 400, title: "root" }], blocking: [{ id: 402, index: 101, identifier: "OPS-101", project_id: 13, title: "leaf", done: false }] } }],
+    [402, { id: 402, index: 101, identifier: "OPS-101", project_id: 13, title: "leaf", done: false, related_tasks: { blocked: [{ id: 401, title: "middle" }], blocking: [{ id: 400, title: "root" }] } }],
+  ]);
+  const filters: string[] = [];
+  const fake = fakeServer((request) => {
+    const filter = request.query.get("filter") ?? "";
+    filters.push(filter);
+    const ids = filter.replace("id in ", "").split(",").map((id) => Number(id.trim()));
+    return Response.json(ids.map((id) => tasks.get(id)).filter(Boolean));
+  });
+  const { client } = await clientFor(fake.url);
+  const graph = await client.graph({ taskId: 400, relationKinds: ["blocked"] });
+  expect(filters).toEqual(["id in 400", "id in 401", "id in 402"]);
+  expect(graph).toMatchObject({
+    rootTaskId: 400,
+    relationKinds: ["blocking", "blocked"],
+    maxDepthReached: 2,
+    truncated: false,
+    nodes: [{ id: 400 }, { id: 401 }, { id: 402 }],
+    edges: [
+      { from: 400, to: 401, kind: "blocking" },
+      { from: 401, to: 402, kind: "blocking" },
+      { from: 402, to: 400, kind: "blocking" },
+    ],
+    unresolvedTaskIds: [],
+  });
+});
+
+test("dependency graph reports a max-depth boundary without adding deeper nodes", async () => {
+  const fake = fakeServer((request) => {
+    const filter = request.query.get("filter");
+    if (filter === "id in 400") {
+      return Response.json([{ id: 400, title: "root", done: false, related_tasks: { blocking: [{ id: 401, title: "middle", done: false }] } }]);
+    }
+    if (filter === "id in 401") {
+      return Response.json([{ id: 401, title: "middle", done: false, related_tasks: { blocked: [{ id: 400, title: "root" }], blocking: [{ id: 402, title: "too deep" }] } }]);
+    }
+    return new Response("unexpected", { status: 500 });
+  });
+  const { client } = await clientFor(fake.url);
+  await expect(client.graph({ taskId: 400, maxDepth: 1 })).resolves.toMatchObject({
+    maxDepthReached: 1,
+    truncated: true,
+    truncationReason: "maxDepth",
+    nodes: [{ id: 400 }, { id: 401 }],
+    edges: [{ from: 400, to: 401, kind: "blocking" }],
+  });
+  expect(fake.requests).toHaveLength(2);
+});
+
+test("graph expands the all shorthand to every relation kind", async () => {
+  const fake = fakeServer(() => Response.json([{ id: 400, title: "root", done: false, related_tasks: {} }]));
+  const { client } = await clientFor(fake.url);
+  await expect(client.graph({ taskId: 400, relationKinds: "all", maxDepth: 0 })).resolves.toMatchObject({
+    relationKinds: [...RELATION_KINDS],
+  });
 });
 
 test("HTTP errors are actionable and do not disclose the bearer token", async () => {

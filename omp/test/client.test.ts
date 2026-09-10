@@ -48,7 +48,7 @@ test("list sends direct authenticated API request and Rust-compatible filters", 
     return new Response("unexpected", { status: 500 });
   });
   const { client, config } = await clientFor(fake.url);
-  await expect(client.list(config, { state: "doing", mine: true, filter: "priority >= 3", search: "plan", sortBy: "priority", orderBy: "desc" })).resolves.toEqual([]);
+  await expect(client.list(config, { state: "doing", mine: true, filter: "priority >= 3", search: "plan", sortBy: "priority", orderBy: "desc" })).resolves.toEqual({ tasks: [], count: 0, truncated: false, limit: 200 });
   expect(fake.requests[0]).toMatchObject({ method: "GET", path: "/api/v1/tasks", authorization: "Bearer secret" });
   expect(fake.requests[0].query.get("filter")).toBe("project_id = 17 && done = false && percent_done > 0 && assignees in me && (priority >= 3)");
   expect(fake.requests[0].query.get("per_page")).toBe("50");
@@ -107,13 +107,18 @@ test("attachment listing returns compact file metadata", async () => {
     file: { id: 33, name: "render.png", mime: "image/png", size: 2048, extra: true },
   }]));
   const { client } = await clientFor(fake.url);
-  await expect(client.attachments(9)).resolves.toEqual([{
-    id: 12,
-    task_id: 9,
-    created: "2026-09-04T12:00:00Z",
-    created_by: "me",
-    file: { id: 33, name: "render.png", mime: "image/png", size: 2048 },
-  }]);
+  await expect(client.attachments(9)).resolves.toEqual({
+    attachments: [{
+      id: 12,
+      task_id: 9,
+      created: "2026-09-04T12:00:00Z",
+      created_by: "me",
+      file: { id: 33, name: "render.png", mime: "image/png", size: 2048 },
+    }],
+    count: 1,
+    truncated: false,
+    limit: 200,
+  });
   expect(fake.requests[0]).toMatchObject({ method: "GET", path: "/api/v1/tasks/9/attachments" });
 });
 
@@ -313,4 +318,79 @@ test("HTTP errors are actionable and do not disclose the bearer token", async ()
   const { client } = await clientFor(fake.url);
   await expect(client.comments(1)).rejects.toThrow("Vikunja API request failed: 403 Forbidden");
   await expect(client.comments(1)).rejects.not.toThrow("secret");
+});
+
+/** Serves `total` synthetic tasks, clamping per_page the way a Vikunja server does. */
+function pagedTaskServer(total: number, serverMaxPerPage = 50) {
+  return fakeServer((request) => {
+    if (request.path !== "/api/v1/tasks") return new Response("unexpected", { status: 500 });
+    const size = Math.min(Number(request.query.get("per_page")), serverMaxPerPage);
+    const page = Number(request.query.get("page"));
+    const start = (page - 1) * size;
+    const items = Array.from({ length: Math.max(0, Math.min(size, total - start)) }, (_, index) => ({
+      id: start + index + 1,
+      title: `task ${start + index + 1}`,
+      done: false,
+    }));
+    return Response.json(items, { headers: { "x-pagination-total-pages": String(Math.max(1, Math.ceil(total / size))) } });
+  });
+}
+
+test("list walks every page until the result set is exhausted", async () => {
+  const fake = pagedTaskServer(120);
+  const { client, config } = await clientFor(fake.url);
+  const listed = await client.list(config, {}) as { tasks: Array<{ id: number }>; count: number; truncated: boolean };
+  expect(listed.count).toBe(120);
+  expect(listed.truncated).toBe(false);
+  expect(listed.tasks.at(-1)).toMatchObject({ id: 120 });
+  expect(fake.requests.map((request) => request.query.get("page"))).toEqual(["1", "2", "3"]);
+  expect(fake.requests.every((request) => request.query.get("per_page") === "50")).toBe(true);
+});
+
+test("list stops at the limit and reports truncation instead of dropping results silently", async () => {
+  const fake = pagedTaskServer(500);
+  const { client, config } = await clientFor(fake.url);
+  await expect(client.list(config, { limit: 60 })).resolves.toMatchObject({ count: 60, truncated: true, limit: 60 });
+  expect(fake.requests).toHaveLength(2);
+});
+
+test("limit rejects values outside the supported range", async () => {
+  const fake = pagedTaskServer(1);
+  const { client, config } = await clientFor(fake.url);
+  await expect(client.list(config, { limit: 501 })).rejects.toThrow("limit must be an integer between 1 and 500");
+});
+
+test("graph task batches page past the server per-page cap", async () => {
+  const childIds = Array.from({ length: 59 }, (_, index) => 500 + index);
+  const tasks = new Map<number, JsonBody>([
+    [400, { id: 400, title: "root", done: false, related_tasks: { blocking: childIds.map((id) => ({ id, title: `child ${id}`, done: false })) } }],
+    ...childIds.map((id): [number, JsonBody] => [id, { id, title: `child ${id}`, done: false }]),
+  ]);
+  const fake = fakeServer((request) => {
+    if (request.path !== "/api/v1/tasks") return new Response("unexpected", { status: 500 });
+    const requested = [...(request.query.get("filter") ?? "").matchAll(/\d+/g)].map((match) => Number(match[0]));
+    const size = Math.min(Number(request.query.get("per_page")), 50);
+    const page = Number(request.query.get("page"));
+    const items = requested.slice((page - 1) * size, page * size).map((id) => tasks.get(id)).filter(Boolean);
+    return Response.json(items, { headers: { "x-pagination-total-pages": String(Math.max(1, Math.ceil(requested.length / size))) } });
+  });
+  const { client } = await clientFor(fake.url);
+  const graph = await client.graph({ taskId: 400, maxDepth: 1 }) as { nodes: unknown[]; unresolvedTaskIds: number[] };
+  expect(graph.nodes).toHaveLength(60);
+  expect(graph.unresolvedTaskIds).toEqual([]);
+});
+
+test("comments paginate and report their limit", async () => {
+  const fake = fakeServer((request) => {
+    const page = Number(request.query.get("page"));
+    const items = page === 1
+      ? Array.from({ length: 50 }, (_, index) => ({ id: index + 1, comment: `<p>note ${index + 1}</p>` }))
+      : [{ id: 51, comment: "<p>note 51</p>" }];
+    return Response.json(items, { headers: { "x-pagination-total-pages": "2" } });
+  });
+  const { client } = await clientFor(fake.url);
+  const listed = await client.comments(9) as { comments: Array<{ id: number; comment: string }>; count: number; truncated: boolean };
+  expect(listed.count).toBe(51);
+  expect(listed.truncated).toBe(false);
+  expect(listed.comments.at(-1)).toEqual({ id: 51, comment: "note 51" });
 });

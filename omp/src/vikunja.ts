@@ -69,8 +69,10 @@ export interface VikunjaClientOptions {
 
 type JsonObject = Record<string, unknown>;
 
-const DEFAULT_PER_PAGE = 50;
-const MAX_PER_PAGE = 100;
+const PAGE_SIZE = 50;
+const DEFAULT_LIMIT = 200;
+const MAX_LIMIT = 500;
+const MAX_PAGES = 50;
 const DEFAULT_GRAPH_DEPTH = 10;
 const DEFAULT_GRAPH_NODES = 100;
 const MAX_GRAPH_DEPTH = 20;
@@ -88,6 +90,26 @@ function numberField(value: unknown): number | undefined {
 
 function stringField(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+type PagedResult = { items: unknown[]; truncated: boolean; limit: number };
+
+function resolveLimit(limit: number | undefined): number {
+  if (limit === undefined) return DEFAULT_LIMIT;
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
+    throw new Error(`limit must be an integer between 1 and ${MAX_LIMIT}`);
+  }
+  return limit;
+}
+
+function totalPagesHeader(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function paged(result: PagedResult, key: string, items: unknown): JsonObject {
+  return { [key]: items, count: result.items.length, truncated: result.truncated, limit: result.limit };
 }
 
 type GraphEdge = { from: number; to: number; kind: RelationKind };
@@ -272,10 +294,10 @@ export class VikunjaClient {
     return { client: new VikunjaClient(normalizeServer(config.server), token, options.fetch ?? fetch), config };
   }
 
-  private async request(
+  private async send(
     path: string,
     init: RequestInit & { query?: Record<string, string | undefined>; jsonBody?: boolean } = {},
-  ): Promise<unknown> {
+  ): Promise<{ data: unknown; headers: Headers }> {
     const url = new URL(`${this.baseUrl}${path}`);
     for (const [key, value] of Object.entries(init.query ?? {})) if (value !== undefined) url.searchParams.set(key, value);
     const response = await this.http(url, {
@@ -292,8 +314,48 @@ export class VikunjaClient {
       const detail = text.trim();
       throw new Error(`Vikunja API request failed: ${response.status} ${response.statusText}${detail ? `: ${detail.slice(0, 4_096)}` : ""}`);
     }
-    if (!text.trim()) return null;
-    try { return JSON.parse(text); } catch { throw new Error("Vikunja API returned malformed JSON"); }
+    if (!text.trim()) return { data: null, headers: response.headers };
+    try { return { data: JSON.parse(text), headers: response.headers }; }
+    catch { throw new Error("Vikunja API returned malformed JSON"); }
+  }
+
+  private async request(
+    path: string,
+    init: RequestInit & { query?: Record<string, string | undefined>; jsonBody?: boolean } = {},
+  ): Promise<unknown> {
+    return (await this.send(path, init)).data;
+  }
+
+  /** Walks Vikunja's paginated list endpoints until exhausted, the limit is hit, or MAX_PAGES pages are read. */
+  private async requestAll(
+    path: string,
+    init: { label: string; query?: Record<string, string | undefined>; signal?: AbortSignal; limit?: number },
+  ): Promise<PagedResult> {
+    const limit = resolveLimit(init.limit);
+    const perPage = Math.min(PAGE_SIZE, limit);
+    const items: unknown[] = [];
+    let truncated = false;
+
+    for (let page = 1; page <= MAX_PAGES; page += 1) {
+      const { data, headers } = await this.send(path, {
+        signal: init.signal,
+        query: { ...init.query, page: String(page), per_page: String(perPage) },
+      });
+      if (!Array.isArray(data)) throw new Error(`Vikunja API returned a non-array ${init.label}`);
+      items.push(...data);
+
+      const totalPages = totalPagesHeader(headers.get("x-pagination-total-pages"));
+      // Without the header, a full page is the only evidence that more may follow.
+      const morePages = totalPages !== undefined ? page < totalPages : data.length >= perPage && data.length > 0;
+      if (items.length >= limit) {
+        truncated = morePages || items.length > limit;
+        items.length = limit;
+        break;
+      }
+      if (!morePages) break;
+      if (page === MAX_PAGES) truncated = true;
+    }
+    return { items, truncated, limit };
   }
 
   private projectId(config: VikunjaConfig, projectId?: number): number {
@@ -304,15 +366,13 @@ export class VikunjaClient {
   }
 
   private async tasksByIds(taskIds: number[], signal?: AbortSignal): Promise<JsonObject[]> {
-    const tasks = await this.request("/tasks", {
+    const batch = await this.requestAll("/tasks", {
       signal,
-      query: {
-        filter: `id in ${taskIds.join(", ")}`,
-        per_page: String(taskIds.length),
-      },
+      label: "task batch",
+      limit: taskIds.length,
+      query: { filter: `id in ${taskIds.join(", ")}` },
     });
-    if (!Array.isArray(tasks)) throw new Error("Vikunja API returned a non-array task batch");
-    return tasks.map(asObject).filter((task): task is JsonObject => Boolean(task));
+    return batch.items.map(asObject).filter((task): task is JsonObject => Boolean(task));
   }
 
   private async resolveUser(username: string, signal?: AbortSignal): Promise<number> {
@@ -337,7 +397,7 @@ export class VikunjaClient {
     }
   }
 
-  async list(config: VikunjaConfig, input: { projectId?: number; state?: TaskState; filter?: string; search?: string; sortBy?: string; orderBy?: "asc" | "desc"; perPage?: number; mine?: boolean }, signal?: AbortSignal): Promise<unknown> {
+  async list(config: VikunjaConfig, input: { projectId?: number; state?: TaskState; filter?: string; search?: string; sortBy?: string; orderBy?: "asc" | "desc"; limit?: number; mine?: boolean }, signal?: AbortSignal): Promise<unknown> {
     const projectId = this.projectId(config, input.projectId);
     const clauses = [`project_id = ${projectId}`];
     if (input.state === "todo") clauses.push("done = false && percent_done = 0");
@@ -348,13 +408,14 @@ export class VikunjaClient {
       clauses.push(`assignees in ${config.username}`);
     }
     if (input.filter) clauses.push(`(${input.filter})`);
-    const perPage = input.perPage ?? DEFAULT_PER_PAGE;
-    const tasks = await this.request("/tasks", { signal, query: {
-      filter: clauses.join(" && "), per_page: String(perPage), s: input.search, sort_by: input.sortBy, order_by: input.orderBy,
-    } });
-    if (!Array.isArray(tasks)) throw new Error("Vikunja API returned a non-array task list");
-    if (tasks.length === 0) await this.assertProjectAccessible(projectId, signal);
-    return compactTasks(tasks);
+    const tasks = await this.requestAll("/tasks", {
+      signal,
+      label: "task list",
+      limit: input.limit,
+      query: { filter: clauses.join(" && "), s: input.search, sort_by: input.sortBy, order_by: input.orderBy },
+    });
+    if (tasks.items.length === 0) await this.assertProjectAccessible(projectId, signal);
+    return paged(tasks, "tasks", compactTasks(tasks.items));
   }
 
   async graph(
@@ -446,22 +507,26 @@ export class VikunjaClient {
     };
   }
 
-  async show(taskId: number, includeComments: boolean, signal?: AbortSignal): Promise<unknown> {
+  async show(taskId: number, options: { includeComments?: boolean; limit?: number } = {}, signal?: AbortSignal): Promise<unknown> {
     const task = asObject(await this.request(`/tasks/${taskId}`, { signal }));
     if (!task) throw new Error(`task ${taskId} response is not a JSON object`);
     const compact = compactTask(task);
-    if (includeComments) compact.comments = compactComments(await this.request(`/tasks/${taskId}/comments`, { signal }));
+    if (options.includeComments) {
+      const comments = await this.requestAll(`/tasks/${taskId}/comments`, { signal, label: "comment list", limit: options.limit });
+      compact.comments = compactComments(comments.items);
+      if (comments.truncated) compact.commentsTruncated = true;
+    }
     return compact;
   }
 
-  async comments(taskId: number, signal?: AbortSignal): Promise<unknown> {
-    return compactComments(await this.request(`/tasks/${taskId}/comments`, { signal }));
+  async comments(taskId: number, options: { limit?: number } = {}, signal?: AbortSignal): Promise<unknown> {
+    const comments = await this.requestAll(`/tasks/${taskId}/comments`, { signal, label: "comment list", limit: options.limit });
+    return paged(comments, "comments", compactComments(comments.items));
   }
 
-  async attachments(taskId: number, signal?: AbortSignal): Promise<unknown> {
-    const attachments = await this.request(`/tasks/${taskId}/attachments`, { signal });
-    if (!Array.isArray(attachments)) throw new Error("Vikunja API returned a non-array attachment list");
-    return compactAttachments(attachments);
+  async attachments(taskId: number, options: { limit?: number } = {}, signal?: AbortSignal): Promise<unknown> {
+    const attachments = await this.requestAll(`/tasks/${taskId}/attachments`, { signal, label: "attachment list", limit: options.limit });
+    return paged(attachments, "attachments", compactAttachments(attachments.items));
   }
 
   async assign(
@@ -498,7 +563,7 @@ export class VikunjaClient {
     } catch (error) {
       if (!(error instanceof Error) || !error.message.includes("4021")) throw error;
     }
-    return this.show(input.taskId, false, signal);
+    return this.show(input.taskId, {}, signal);
   }
 
   async relate(
@@ -511,7 +576,7 @@ export class VikunjaClient {
       body: JSON.stringify({ other_task_id: input.otherTaskId, relation_kind: input.relationKind }),
       signal,
     });
-    return this.show(input.taskId, false, signal);
+    return this.show(input.taskId, {}, signal);
   }
 
   async unrelate(
@@ -539,7 +604,7 @@ export class VikunjaClient {
       }),
       signal,
     });
-    return this.show(input.taskId, false, signal);
+    return this.show(input.taskId, {}, signal);
   }
 
   async create(config: VikunjaConfig, input: { projectId?: number; title: string; description?: string; priority?: number; dueDate?: string; percentDone?: number }, signal?: AbortSignal): Promise<unknown> {
@@ -621,4 +686,4 @@ export class VikunjaClient {
   }
 }
 
-export const limits = { DEFAULT_PER_PAGE, MAX_PER_PAGE, MAX_GRAPH_DEPTH, MAX_GRAPH_NODES };
+export const limits = { PAGE_SIZE, DEFAULT_LIMIT, MAX_LIMIT, MAX_GRAPH_DEPTH, MAX_GRAPH_NODES };

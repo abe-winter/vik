@@ -10,7 +10,7 @@ type ReadInput = {
   search?: string;
   sortBy?: string;
   orderBy?: "asc" | "desc";
-  perPage?: number;
+  limit?: number;
   mine?: boolean;
   includeComments?: boolean;
   relationKinds?: RelationKindsInput;
@@ -65,7 +65,7 @@ export default function vikExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "vik_read",
     label: "Vikunja Read",
-    description: "List or show Vikunja tasks, comments, attachments, and bounded dependency graphs. Uses VIKUNJA_TOKEN and discovered Vikunja config.",
+    description: "List or show Vikunja tasks, comments, attachments, and bounded dependency graphs. List, comments, and attachments auto-paginate up to limit and report truncated. Uses VIKUNJA_TOKEN and discovered Vikunja config.",
     approval: "read",
     strict: true,
     parameters: z.object({
@@ -77,7 +77,7 @@ export default function vikExtension(pi: ExtensionAPI) {
       search: z.string().max(512).optional(),
       sortBy: z.string().max(64).optional(),
       orderBy: z.enum(["asc", "desc"]).optional(),
-      perPage: z.number().int().min(1).max(limits.MAX_PER_PAGE).optional(),
+      limit: z.number().int().min(1).max(limits.MAX_LIMIT).optional().describe(`Maximum items returned across auto-paginated list, comments, and attachments requests; defaults to ${limits.DEFAULT_LIMIT}.`),
       mine: z.boolean().optional().describe("Limit list results to the configured username."),
       includeComments: z.boolean().optional().describe("With show, also return the task's comments."),
       relationKinds: z.union([
@@ -93,11 +93,11 @@ export default function vikExtension(pi: ExtensionAPI) {
         case "list":
           return result(await client.list(config, input, signal));
         case "show":
-          return result(await client.show(requiredTaskId(input), input.includeComments === true, signal));
+          return result(await client.show(requiredTaskId(input), { includeComments: input.includeComments === true, limit: input.limit }, signal));
         case "comments":
-          return result(await client.comments(requiredTaskId(input), signal));
+          return result(await client.comments(requiredTaskId(input), { limit: input.limit }, signal));
         case "attachments":
-          return result(await client.attachments(requiredTaskId(input), signal));
+          return result(await client.attachments(requiredTaskId(input), { limit: input.limit }, signal));
         case "graph":
           return result(await client.graph({
             taskId: requiredTaskId(input),

@@ -11,19 +11,15 @@ Note: a lot of the below describes the old CLI. I think the new install instruct
 
 ```sh
 # from inside this repo:
-cd omp
 bun install --frozen-lockfile --production
 omp plugin link .
 
-# from not inside this repo: clone first, then link the omp/ subfolder.
-# `omp plugin install <git url>` does NOT work here: bun installs the whole repo as
-# the package and omp looks for a package.json at the repo root, which doesn't exist
-# (the plugin manifest is omp/package.json). Git specs have no subfolder syntax.
-git clone https://github.com/abe-winter/vik.git
-cd vik/omp
-bun install --frozen-lockfile --production
-omp plugin link .
+# from not inside this repo:
+omp plugin install https://github.com/abe-winter/vik.git
 ```
+
+The plugin manifest is the repo-root `package.json`; it points `omp.extensions` at
+`./omp/src/index.ts`, so a git install picks the extension up without a subfolder spec.
 
 ## features
 

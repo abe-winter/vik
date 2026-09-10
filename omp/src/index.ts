@@ -132,7 +132,7 @@ export default function vikExtension(pi: ExtensionAPI) {
       files: z.array(z.string().min(1).max(4_096)).min(1).max(20).optional().describe("Attachment paths relative to the OMP working directory."),
       embed: z.boolean().optional().describe("Append uploaded attachments as Markdown images in the task description."),
       otherTaskId: z.number().int().positive().optional().describe("Global id of the other task in a relation."),
-      relationKind: z.enum(RELATION_KINDS).optional().describe("Describes taskId relative to otherTaskId; for example, blocking means taskId blocks otherTaskId."),
+      relationKind: z.enum(RELATION_KINDS).optional().describe("Read as the sentence 'taskId <relationKind> otherTaskId': blocking means taskId must finish first and holds up otherTaskId, blocked means taskId is waiting on otherTaskId; so put blocked on the task you cannot start yet."),
     }),
     async execute(_id, input: WriteInput, signal, _onUpdate, ctx) {
       const { client, config } = await VikunjaClient.create({ cwd: ctx.cwd });
